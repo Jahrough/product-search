@@ -1,0 +1,63 @@
+server:
+  port: 8081 # Changed to 8081 to avoid port collision with product-catalog (8080)
+
+app:
+  opensearch:
+    uris: ${OPENSEARCH_URIS:http://localhost:9200}
+  kafka:
+    topic:
+      product-events: "product-events"
+
+spring:
+  application:
+    name: product-search
+
+  # Redis Configuration for Query Caching
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 2000ms
+
+  # Kafka Consumer Configuration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: product-search-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "dev.jahlopez.productsearch.*,dev.jahlopez.productcatalog.event.*"
+        spring.json.value.default.type: "dev.jahlopez.productsearch.event.ProductEvent"
+
+# SpringDoc OpenAPI / Swagger UI Configuration
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: method
+
+# Enterprise Observability, Actuator & Health Probes
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, prometheus, metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+  tracing:
+    sampling:
+      probability: 1.0
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318/v1/traces}

@@ -1,0 +1,34 @@
+spring:
+  application:
+    name: product-search-test
+
+  # Redis Configuration for Caching Tests
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 2000ms
+
+  # Kafka Consumer Configuration for Event Ingestion Tests
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: product-search-test-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "dev.jahlopez.productsearch.*,dev.jahlopez.productcatalog.event.*"
+
+app:
+  # OpenSearch URI for search integration and repository tests
+  opensearch:
+    uris: ${OPENSEARCH_URIS:http://localhost:9200}
+
+logging:
+  level:
+    # Enable verbose debugging for search service packages during test execution
+    dev.jahlopez.productsearch: DEBUG
+    org.springframework.test: INFO
+    org.springframework.kafka: DEBUG
+    org.opensearch.client: DEBUG
