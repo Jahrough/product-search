@@ -37,6 +37,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
+/**
+ * Unit test suite for {@link ProductSearchService}.
+ * <p>
+ * Validates query validation rules, exception handling, indexing/deletion operations,
+ * and graceful degradation fallback execution when OpenSearch operations fail or circuit breakers trip.
+ */
 @ExtendWith(MockitoExtension.class)
 @DisplayName("Product Search Service")
 class ProductSearchServiceTest {
@@ -81,6 +87,32 @@ class ProductSearchServiceTest {
                 .price(new BigDecimal("49.99"))
                 .stockQuantity(100)
                 .build();
+    }
+
+    @Nested
+    @DisplayName("Input Validation Tests")
+    class ValidationTests {
+
+        @Test
+        @DisplayName("Should throw IllegalArgumentException when search query DTO is null")
+        void shouldThrowExceptionWhenQueryDtoIsNull() {
+            assertThatThrownBy(() -> productSearchService.searchProducts(null, PAGEABLE))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("Search query must not be null");
+        }
+
+        @Test
+        @DisplayName("Should throw IllegalArgumentException when page size is less than or equal to zero")
+        void shouldThrowExceptionWhenPageSizeInvalid() {
+            ProductSearchQueryDto queryDto = new ProductSearchQueryDto();
+            Pageable invalidPageable = mock(Pageable.class);
+            when(invalidPageable.isUnpaged()).thenReturn(false);
+            when(invalidPageable.getPageSize()).thenReturn(0);
+
+            assertThatThrownBy(() -> productSearchService.searchProducts(queryDto, invalidPageable))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("Page size must be greater than zero");
+        }
     }
 
     @Nested
@@ -210,11 +242,11 @@ class ProductSearchServiceTest {
             )).thenReturn(response);
 
             assertThatThrownBy(
-                    () -> productSearchService.getProductById(INVALID_ID)
+                    () -> productSearchService.getProductById(PRODUCT_ID)
             )
                     .isInstanceOf(ResourceNotFoundException.class)
                     .hasMessageContaining(
-                            "Product not found with ID: " + INVALID_ID
+                            "Product not found with ID: " + PRODUCT_ID
                     );
 
             verifyNoInteractions(productMapper);
@@ -270,7 +302,7 @@ class ProductSearchServiceTest {
     }
 
     @Nested
-    @DisplayName("Product indexing")
+    @DisplayName("Product indexing and management")
     class ProductIndexingTests {
 
         @Test

@@ -30,6 +30,7 @@ val testcontainersVersion = "1.21.4"
 val testcontainersRedisVersion = "2.2.4"
 val jakartaJsonVersion = "2.1.3"
 val parssonVersion = "1.1.6"
+val resilience4jVersion = "2.1.0"
 
 // Override Spring Boot managed version for Testcontainers
 extra["testcontainers.version"] = testcontainersVersion
@@ -38,6 +39,10 @@ dependencies {
     // REST API and validation
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springframework.boot:spring-boot-starter-validation")
+
+    // Service Resilience (Resilience4j Circuit Breaker & Rate Limiter)
+    implementation("io.github.resilience4j:resilience4j-spring-boot3:$resilience4jVersion")
+    implementation("org.springframework.boot:spring-boot-starter-aop")
 
     // Database & Persistence (Spring Data JPA, PostgreSQL, Flyway)
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")

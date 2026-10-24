@@ -1,4 +1,3 @@
-
 package dev.jahlopez.productsearch.service;
 
 import dev.jahlopez.productsearch.document.ProductDocument;
@@ -6,6 +5,7 @@ import dev.jahlopez.productsearch.dto.ProductResponseDto;
 import dev.jahlopez.productsearch.dto.ProductSearchQueryDto;
 import dev.jahlopez.productsearch.exception.ResourceNotFoundException;
 import dev.jahlopez.productsearch.mapper.ProductMapper;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.opensearch.client.opensearch.OpenSearchClient;
@@ -26,6 +26,10 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
 
+/**
+ * Service component for handling product search queries, indexing, and lookup operations
+ * against OpenSearch with integrated caching and Resilience4j circuit breaker fallback behavior.
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -46,6 +50,7 @@ public class ProductSearchService {
      * @param pageable pagination parameters
      * @return a page of matching products
      */
+    @CircuitBreaker(name = "openSearchService", fallbackMethod = "searchProductsFallback")
     public Page<ProductResponseDto> searchProducts(
             ProductSearchQueryDto queryDto,
             Pageable pageable
@@ -124,12 +129,32 @@ public class ProductSearchService {
     }
 
     /**
+     * Fallback method executed when {@link #searchProducts} encounters an open circuit breaker
+     * or prolonged OpenSearch outage.
+     *
+     * @param queryDto search criteria
+     * @param pageable pagination parameters
+     * @param exception the triggering exception or throwable
+     * @return an empty page or a degraded response
+     */
+    private Page<ProductResponseDto> searchProductsFallback(
+            ProductSearchQueryDto queryDto,
+            Pageable pageable,
+            Throwable exception
+    ) {
+        log.warn("Circuit breaker active for product search. Executing graceful degradation fallback. Reason: {}",
+                exception.getMessage());
+        return Page.empty(pageable);
+    }
+
+    /**
      * Retrieves a product by its OpenSearch document ID.
      *
      * @param id product document ID
      * @return product details
      */
     @Cacheable(key = "'id:' + #id")
+    @CircuitBreaker(name = "openSearchService", fallbackMethod = "getProductByIdFallback")
     public ProductResponseDto getProductById(String id) {
         validateIdentifier(id, "Product ID");
 
@@ -142,12 +167,28 @@ public class ProductSearchService {
     }
 
     /**
+     * Fallback method executed when {@link #getProductById} encounters an open circuit breaker.
+     * Note: When Redis caching is active, Spring Cache-Aside may intercept before hitting this fallback
+     * if the cache entry is warm.
+     *
+     * @param id product document ID
+     * @param exception the triggering exception or throwable
+     * @return throws a degraded service-unavailable runtime exception
+     */
+    private ProductResponseDto getProductByIdFallback(String id, Throwable exception) {
+        log.warn("Circuit breaker active for product lookup by ID [id: {}]. Reason: {}",
+                id, exception.getMessage());
+        throw new IllegalStateException("Product search service is temporarily degraded. Please try again shortly.", exception);
+    }
+
+    /**
      * Retrieves a product by SKU.
      *
      * @param sku product stock keeping unit
      * @return product details
      */
     @Cacheable(key = "'sku:' + #sku")
+    @CircuitBreaker(name = "openSearchService", fallbackMethod = "getProductBySkuFallback")
     public ProductResponseDto getProductBySku(String sku) {
         validateIdentifier(sku, "SKU");
 
@@ -189,6 +230,19 @@ public class ProductSearchService {
                     exception
             );
         }
+    }
+
+    /**
+     * Fallback method executed when {@link #getProductBySku} encounters an open circuit breaker.
+     *
+     * @param sku product stock keeping unit
+     * @param exception the triggering exception or throwable
+     * @return throws a degraded service-unavailable runtime exception
+     */
+    private ProductResponseDto getProductBySkuFallback(String sku, Throwable exception) {
+        log.warn("Circuit breaker active for product lookup by SKU [sku: {}]. Reason: {}",
+                sku, exception.getMessage());
+        throw new IllegalStateException("Product search service is temporarily degraded. Please try again shortly.", exception);
     }
 
     /**
