@@ -51,7 +51,7 @@ jobs:
         run: docker build -t product-search:${{ github.sha }} .
 
       - name: Run Trivy Vulnerability Scanner
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: product-search:${{ github.sha }}
           format: sarif
