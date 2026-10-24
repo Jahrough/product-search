@@ -1,0 +1,36 @@
+# Version Control & IDEs
+.git
+.gitignore
+.idea/
+*.iml
+.vscode/
+
+# Build & Dependency Outputs
+build/
+target/
+.gradle/
+.mvn/
+.m2/
+node_modules/
+
+# Docker & CI/CD configurations
+Dockerfile
+docker-compose*.yml
+.dockerignore
+.github/
+
+# Logs, Temp Files & OS Specifics
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+
+# Documentation & Local Scripts
+README.md
+*.sh
+gradlew
+gradlew.bat
+gradle.properties
+settings.gradle.kts
+build.gradle.kts
