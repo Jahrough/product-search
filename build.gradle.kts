@@ -39,6 +39,11 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springframework.boot:spring-boot-starter-validation")
 
+    // Database & Persistence (Spring Data JPA, PostgreSQL, Flyway)
+    implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+    runtimeOnly("org.postgresql:postgresql")
+    implementation("org.flywaydb:flyway-core")
+
     // Kafka event consumption
     implementation("org.springframework.kafka:spring-kafka")
 
@@ -91,9 +96,10 @@ dependencies {
     // JUnit Platform
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 
-    // Testcontainers: Kafka and JUnit
+    // Testcontainers: Kafka, PostgreSQL, and JUnit
     testImplementation("org.testcontainers:junit-jupiter")
     testImplementation("org.testcontainers:kafka")
+    testImplementation("org.testcontainers:postgresql")
 
     // OpenSearch Testcontainers
     testImplementation("org.opensearch:opensearch-testcontainers:$openSearchTestcontainersVersion")
