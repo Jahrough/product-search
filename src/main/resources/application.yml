@@ -1,5 +1,5 @@
 server:
-  port: 8081 # Changed to 8081 to avoid port collision with product-catalog (8080)
+  port: 8081
 
 app:
   opensearch:

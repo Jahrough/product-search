@@ -1,8 +1,8 @@
 plugins {
     java
     jacoco
-    id("org.springframework.boot") version "3.2.4"
-    id("io.spring.dependency-management") version "1.1.7"
+    id("org.springframework.boot") version "3.3.5"
+    id("io.spring.dependency-management") version "1.1.6"
 }
 
 group = "dev.jahlopez"
@@ -18,21 +18,21 @@ repositories {
     mavenCentral()
 }
 
-// Dependency versions
-val springBootVersion = "3.2.4"
+// Updated Dependency versions
+val springBootVersion = "3.3.5"
 val lombokVersion = "1.18.36"
-val mapstructVersion = "1.5.5.Final"
-val openSearchVersion = "2.12.0"
+val mapstructVersion = "1.6.3"
+val openSearchVersion = "2.17.0"
 val openSearchTestcontainersVersion = "2.1.4"
 val springdocVersion = "2.6.0"
-val logstashEncoderVersion = "7.4"
-val testcontainersVersion = "1.21.4"
+val logstashEncoderVersion = "8.0"
+val testcontainersVersion = "1.20.3"
 val testcontainersRedisVersion = "2.2.4"
 val jakartaJsonVersion = "2.1.3"
-val parssonVersion = "1.1.6"
-val resilience4jVersion = "2.1.0"
+val parssonVersion = "1.1.7"
+val resilience4jVersion = "2.2.0"
 
-// Override Spring Boot managed version for Testcontainers
+// Override managed dependencies for transitive fixes if needed
 extra["testcontainers.version"] = testcontainersVersion
 
 dependencies {
@@ -40,11 +40,11 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springframework.boot:spring-boot-starter-validation")
 
-    // Service Resilience (Resilience4j Circuit Breaker & Rate Limiter)
+    // Service Resilience
     implementation("io.github.resilience4j:resilience4j-spring-boot3:$resilience4jVersion")
     implementation("org.springframework.boot:spring-boot-starter-aop")
 
-    // Database & Persistence (Spring Data JPA, PostgreSQL, Flyway)
+    // Database & Persistence
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     runtimeOnly("org.postgresql:postgresql")
     implementation("org.flywaydb:flyway-core")
@@ -101,7 +101,7 @@ dependencies {
     // JUnit Platform
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 
-    // Testcontainers: Kafka, PostgreSQL, and JUnit
+    // Testcontainers
     testImplementation("org.testcontainers:junit-jupiter")
     testImplementation("org.testcontainers:kafka")
     testImplementation("org.testcontainers:postgresql")
@@ -114,15 +114,13 @@ dependencies {
 }
 
 jacoco {
-    toolVersion = "0.8.11"
+    toolVersion = "0.8.12"
 }
 
-// Java compiler configuration
 tasks.withType<JavaCompile>().configureEach {
     options.compilerArgs.add("-Xlint:deprecation")
 }
 
-// MapStruct options for production compilation
 tasks.named<JavaCompile>("compileJava") {
     options.compilerArgs.addAll(
         listOf(
@@ -132,13 +130,11 @@ tasks.named<JavaCompile>("compileJava") {
     )
 }
 
-// Test execution
 tasks.test {
     useJUnitPlatform()
     finalizedBy(tasks.jacocoTestReport)
 }
 
-// JaCoCo reports
 tasks.jacocoTestReport {
     dependsOn(tasks.test)
 
