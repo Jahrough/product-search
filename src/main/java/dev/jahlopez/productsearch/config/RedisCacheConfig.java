@@ -47,9 +47,10 @@ public class RedisCacheConfig {
                         .allowIfBaseType(Object.class)
                         .build();
 
+        // Fixed: Use NON_FINAL instead of EVERYTHING for secure polymorphic type validation
         objectMapper.activateDefaultTyping(
                 typeValidator,
-                ObjectMapper.DefaultTyping.EVERYTHING,
+                ObjectMapper.DefaultTyping.NON_FINAL,
                 JsonTypeInfo.As.PROPERTY
         );
 

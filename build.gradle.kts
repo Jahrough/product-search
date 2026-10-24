@@ -26,13 +26,13 @@ val openSearchVersion = "2.17.0"
 val openSearchTestcontainersVersion = "2.1.4"
 val springdocVersion = "2.6.0"
 val logstashEncoderVersion = "8.0"
-val testcontainersVersion = "1.20.3"
+val testcontainersVersion = "1.21.4"
 val testcontainersRedisVersion = "2.2.4"
 val jakartaJsonVersion = "2.1.3"
 val parssonVersion = "1.1.7"
 val resilience4jVersion = "2.2.0"
 
-// Override managed dependencies for transitive fixes if needed
+// Override managed dependencies for transitive fixes
 extra["testcontainers.version"] = testcontainersVersion
 
 dependencies {
@@ -48,6 +48,7 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     runtimeOnly("org.postgresql:postgresql")
     implementation("org.flywaydb:flyway-core")
+    implementation("org.flywaydb:flyway-database-postgresql")
 
     // Kafka event consumption
     implementation("org.springframework.kafka:spring-kafka")
