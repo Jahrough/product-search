@@ -13,9 +13,8 @@ target/
 .m2/
 node_modules/
 
-# Docker & CI/CD configurations
-Dockerfile
-docker-compose*.yml
+# Docker & CI/CD configurations (Keep Dockerfile/Compose if you don't want them in the image,
+# but DO NOT ignore the gradle build files required by COPY commands)
 .dockerignore
 .github/
 
@@ -25,12 +24,3 @@ docker-compose*.yml
 *.bak
 .DS_Store
 Thumbs.db
-
-# Documentation & Local Scripts
-README.md
-*.sh
-gradlew
-gradlew.bat
-gradle.properties
-settings.gradle.kts
-build.gradle.kts
