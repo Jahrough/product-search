@@ -1,7 +1,7 @@
 plugins {
     java
     jacoco
-    id("org.springframework.boot") version "3.3.5"
+    id("org.springframework.boot") version "4.0.9"
     id("io.spring.dependency-management") version "1.1.6"
 }
 
@@ -19,12 +19,12 @@ repositories {
 }
 
 // Updated Dependency versions
-val springBootVersion = "3.3.5"
+val springBootVersion = "4.0.9"
 val lombokVersion = "1.18.36"
 val mapstructVersion = "1.6.3"
 val openSearchVersion = "2.17.0"
 val openSearchTestcontainersVersion = "2.1.4"
-val springdocVersion = "2.6.0"
+val springdocVersion = "3.0.3"
 val logstashEncoderVersion = "8.0"
 val testcontainersVersion = "1.21.4"
 val testcontainersRedisVersion = "2.2.4"
@@ -32,7 +32,7 @@ val jakartaJsonVersion = "2.1.3"
 val parssonVersion = "1.1.7"
 val resilience4jVersion = "2.2.0"
 
-// Override managed dependencies for transitive fixes
+// Override managed dependencies for vulnerability fixes & Testcontainers compatibility
 extra["testcontainers.version"] = testcontainersVersion
 
 dependencies {
@@ -42,7 +42,7 @@ dependencies {
 
     // Service Resilience
     implementation("io.github.resilience4j:resilience4j-spring-boot3:$resilience4jVersion")
-    implementation("org.springframework.boot:spring-boot-starter-aop")
+    implementation("org.springframework.boot:spring-boot-starter-aspectj")
 
     // Database & Persistence
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
@@ -91,6 +91,8 @@ dependencies {
 
     // Testing
     testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+    testImplementation("org.springframework.boot:spring-boot-starter-data-jpa-test")
     testImplementation("org.springframework.kafka:spring-kafka-test")
 
     // Test annotation processing
