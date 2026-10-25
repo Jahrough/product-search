@@ -31,25 +31,34 @@ caching.
 
 ## Architecture
 
-```text
-Product producer
-      |
-      v
-Kafka: product-events ---> Product Search consumer ---> OpenSearch: products
-      |                             |
-      |                             +-- PostgreSQL: processed_events
-      +-- failed events after retries ---> product-events.DLT
+```mermaid
+flowchart LR
+    Producer[Product event source] --> Events[Kafka: product-events]
 
-API clients ---> REST API ---> OpenSearch
-                       |
-                       +------> Redis response cache
+    Events --> General[General listener<br/>group: product-search-group]
+    Events --> Indexer[Indexing listener<br/>group: product-search-search-group]
+    Indexer --> Inbox[(PostgreSQL<br/>processed_events)]
+    Indexer --> SearchIndex[(OpenSearch<br/>products index)]
+
+    General -. listener failure after retries .-> DLT[Kafka: product-events.DLT]
+    Indexer -. listener failure after retries .-> DLT
+    DLT --> DltListener[DLT logging listener<br/>group: product-search-dlq-group]
+
+    Client[API clients] --> API[REST API]
+    API -->|Search| SearchIndex
+    API -->|ID/SKU lookup| Cache[(Redis cache)]
+    Cache -. cache miss .-> SearchIndex
 ```
 
 The upstream product service remains the system of record and publishes
 authoritative events. OpenSearch is the read/search projection, Redis is a
 rebuildable cache, and PostgreSQL stores the consumer inbox used for event
-deduplication and version checks. Flyway applies the PostgreSQL migration at
-application startup.
+deduplication and version checks. Both source-topic consumer groups receive
+events independently. The indexing listener updates OpenSearch and records
+processed-event metadata; its writes to these two systems are not atomic.
+Failed listener records are retried before routing to the DLT, where a
+separate listener logs them for operator handling. Flyway applies the
+PostgreSQL migration at application startup.
 
 ### Product event contract
 
