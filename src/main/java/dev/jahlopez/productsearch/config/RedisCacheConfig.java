@@ -82,7 +82,7 @@ public class RedisCacheConfig {
      * an immutable map, preventing runtime mutation of the cache policy.
      *
      * <p>Caches not listed here inherit {@link #DEFAULT_TTL} from the shared
-     * {@link RedisCacheConfiguration}.</p>
+     * {@link RedisCacheConfiguration}.
      */
     private static final Map<String, Duration> CACHE_TTLS = Map.of(
             PRODUCTS_BY_ID_CACHE, PRODUCT_LOOKUP_TTL,
