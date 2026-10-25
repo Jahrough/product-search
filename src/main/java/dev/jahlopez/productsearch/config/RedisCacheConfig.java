@@ -21,20 +21,20 @@ import java.util.Map;
  * <p>This configuration enables Spring's cache abstraction and defines the
  * serialization, expiration, and cache-manager policies used by the service.
  * Application services can use annotations such as {@code @Cacheable},
- * {@code @CachePut}, and {@code @CacheEvict} to interact with these caches.</p>
+ * {@code @CachePut}, and {@code @CacheEvict} to interact with these caches.
  *
  * <p>Redis is a performance optimization, not the source of truth. Cached
  * entries must be safe to expire, invalidate, or rebuild from the underlying
- * data source.</p>
+ * data source.
  *
  * <p>Cache names declared here must remain consistent with the names used by
  * application-level cache annotations. Changes to serialized value formats
  * should be coordinated with cache invalidation or a cache-key namespace
- * change to avoid incompatibility with existing entries.</p>
+ * change to avoid incompatibility with existing entries.
  *
  * <p>Redis should be accessible only to trusted application components.
  * Serialization restrictions are defense in depth and do not replace
- * network isolation, authentication, or authorization.</p>
+ * network isolation, authentication, or authorization.
  */
 @Configuration(proxyBeanMethods = false)
 @EnableCaching
@@ -45,7 +45,7 @@ public class RedisCacheConfig {
      *
      * <p>Expiration limits how long an entry can remain in Redis without
      * being refreshed. It does not guarantee immediate consistency when
-     * the underlying search index or product data changes.</p>
+     * the underlying search index or product data changes.
      */
     private static final Duration DEFAULT_TTL = Duration.ofMinutes(60);
 
@@ -54,7 +54,7 @@ public class RedisCacheConfig {
      *
      * <p>A shared duration keeps product-ID and SKU lookups consistent.
      * Adjust this value based on data freshness requirements and cache hit
-     * rates.</p>
+     * rates.
      */
     private static final Duration PRODUCT_LOOKUP_TTL = Duration.ofMinutes(30);
 
@@ -62,7 +62,7 @@ public class RedisCacheConfig {
      * Expiration for product list and search results.
      *
      * <p>Search results may become stale as indexed products change, so
-     * they use a shorter lifetime than individual product lookups.</p>
+     * they use a shorter lifetime than individual product lookups.
      */
     private static final Duration PRODUCT_LIST_TTL = Duration.ofMinutes(15);
 
@@ -79,7 +79,7 @@ public class RedisCacheConfig {
      * Per-cache expiration policies.
      *
      * <p>{@link Map#of(Object, Object, Object, Object, Object, Object)} creates
-     * an immutable map, preventing runtime mutation of the cache policy.</p>
+     * an immutable map, preventing runtime mutation of the cache policy.
      *
      * <p>Caches not listed here inherit {@link #DEFAULT_TTL} from the shared
      * {@link RedisCacheConfiguration}.</p>
@@ -95,31 +95,35 @@ public class RedisCacheConfig {
      *
      * <p>Cache keys use string serialization for readability and predictable
      * key representation. Cache values use JSON serialization so values are
-     * not stored as Java-native serialized objects.</p>
+     * not stored as Java-native serialized objects.
      *
      * <p>Polymorphic deserialization is restricted to the application's
-     * product-search package and Java collection types. Only enable the
+     * product-search package and a small set of JDK packages. Only enable the
      * minimum set of types required by the actual cached values. Never treat
      * this allowlist as a substitute for trusting and securing the Redis
-     * data source.</p>
+     * data source.
+     *
+     * <p>Jackson 3 supports {@code java.time} natively and writes dates as
+     * ISO-8601 strings by default, so no extra module or date feature is
+     * configured here.
      *
      * @return the default Redis cache configuration
      */
     @Bean
     public RedisCacheConfiguration cacheConfiguration() {
         // Limit polymorphic deserialization to application-owned types and
-        // collection implementations needed by cached values.
+        // JDK types needed by cached values.
         BasicPolymorphicTypeValidator typeValidator =
                 BasicPolymorphicTypeValidator.builder()
                         .allowIfSubType("dev.jahlopez.productsearch.")
                         .allowIfSubType("java.util.")
+                        .allowIfSubType("java.math.")
+                        .allowIfSubType("java.time.")
                         .build();
 
-        // Use JSON for cache values to avoid Java native object serialization.
-        // Keep serializer settings compatible across service deployments.
         GenericJacksonJsonRedisSerializer jsonSerializer =
                 GenericJacksonJsonRedisSerializer.builder()
-                        .enableDefaultTyping(typeValidator)
+                        .typeValidator(typeValidator)
                         .build();
 
         return RedisCacheConfiguration.defaultCacheConfig()
@@ -137,7 +141,7 @@ public class RedisCacheConfig {
                                 .fromSerializer(new StringRedisSerializer())
                 )
 
-                // Store cache values as JSON using the configured validator.
+                // Store cache values as JSON using the configured serializer.
                 .serializeValuesWith(
                         RedisSerializationContext.SerializationPair
                                 .fromSerializer(jsonSerializer)
@@ -150,11 +154,11 @@ public class RedisCacheConfig {
      * <p>The manager uses the shared serialization configuration and default
      * TTL, then overrides the TTL for the named product caches. Declaring this
      * bean explicitly ensures that caching has a {@link CacheManager} in
-     * contexts where Spring Boot's cache auto-configuration is not active.</p>
+     * contexts where Spring Boot's cache auto-configuration is not active.
      *
      * <p>TTL is a freshness and storage policy, not an invalidation mechanism.
      * If product updates must become visible quickly, use explicit eviction
-     * or event-driven invalidation in addition to expiration.</p>
+     * or event-driven invalidation in addition to expiration.
      *
      * @param connectionFactory the Redis connection factory managed by Spring
      * @param cacheConfiguration the shared key, value, and default TTL settings
