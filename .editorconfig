@@ -1,0 +1,80 @@
+# EditorConfig: consistent coding styles across editors and IDEs
+# https://editorconfig.org
+root = true
+
+# ---------------------------------------------------------------------------
+# Defaults for all files
+# ---------------------------------------------------------------------------
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# ---------------------------------------------------------------------------
+# Java
+# ---------------------------------------------------------------------------
+[*.java]
+max_line_length = 120
+continuation_indent_size = 8
+ij_java_use_single_class_imports = true
+ij_java_class_count_to_use_import_on_demand = 999
+ij_java_names_count_to_use_import_on_demand = 999
+
+# ---------------------------------------------------------------------------
+# Kotlin and Gradle (Groovy and Kotlin DSL)
+# ---------------------------------------------------------------------------
+[*.{kt,kts,gradle}]
+max_line_length = 120
+
+# ---------------------------------------------------------------------------
+# Config, data and markup formats
+# ---------------------------------------------------------------------------
+[*.{yml,yaml,json,xml,html,css,js,ts}]
+indent_size = 2
+
+[*.properties]
+indent_size = 4
+
+[*.sql]
+indent_size = 2
+
+# ---------------------------------------------------------------------------
+# Scripts, containers and build tooling
+# ---------------------------------------------------------------------------
+[*.sh]
+indent_size = 2
+
+# Windows scripts require CRLF
+[*.{bat,cmd}]
+end_of_line = crlf
+
+# Make requires tabs
+[{Makefile,*.mk}]
+indent_style = tab
+
+[{Dockerfile,Dockerfile.*,*.dockerfile}]
+indent_size = 4
+
+# ---------------------------------------------------------------------------
+# Documentation
+# ---------------------------------------------------------------------------
+[*.md]
+indent_size = 2
+# Two trailing spaces are a hard line break in Markdown
+trim_trailing_whitespace = false
+max_line_length = off
+
+# ---------------------------------------------------------------------------
+# Generated or vendored files: leave untouched
+# ---------------------------------------------------------------------------
+[{build/**,.gradle/**,gradlew,gradlew.bat,**/generated/**}]
+charset = unset
+end_of_line = unset
+indent_style = unset
+indent_size = unset
+insert_final_newline = unset
+trim_trailing_whitespace = unset
+max_line_length = unset
