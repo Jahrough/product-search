@@ -24,6 +24,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+/**
+ * Controller exposing REST endpoints for searching and looking up products in OpenSearch.
+ */
 @RestController
 @RequestMapping("/api/v1/products/search")
 @RequiredArgsConstructor
@@ -39,9 +42,9 @@ public class ProductSearchController {
     /**
      * Searches products using keyword and category filters.
      *
-     * @param queryDto search criteria
+     * @param queryDto search criteria and filter parameters
      * @param pageable pagination and sorting parameters
-     * @return matching products
+     * @return matching products page
      */
     @Operation(
             summary = "Search products",
@@ -61,9 +64,7 @@ public class ProductSearchController {
             @Valid @RequestBody ProductSearchQueryDto queryDto,
             @ParameterObject Pageable pageable
     ) {
-        Page<ProductResponseDto> results =
-                productSearchService.searchProducts(queryDto, pageable);
-
+        Page<ProductResponseDto> results = productSearchService.searchProducts(queryDto, pageable);
         return ResponseEntity.ok(results);
     }
 
@@ -91,9 +92,7 @@ public class ProductSearchController {
             @Parameter(description = "Unique product document ID", required = true)
             @PathVariable String id
     ) {
-        return ResponseEntity.ok(
-                productSearchService.getProductById(id)
-        );
+        return ResponseEntity.ok(productSearchService.getProductById(id));
     }
 
     /**
@@ -120,8 +119,6 @@ public class ProductSearchController {
             @Parameter(description = "Unique product SKU", required = true)
             @PathVariable String sku
     ) {
-        return ResponseEntity.ok(
-                productSearchService.getProductBySku(sku)
-        );
+        return ResponseEntity.ok(productSearchService.getProductBySku(sku));
     }
 }

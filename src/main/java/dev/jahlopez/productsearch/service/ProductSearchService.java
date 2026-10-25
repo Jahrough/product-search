@@ -26,10 +26,6 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
 
-/**
- * Service component for handling product search queries, indexing, and lookup operations
- * against OpenSearch with integrated caching and Resilience4j circuit breaker fallback behavior.
- */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -39,6 +35,9 @@ public class ProductSearchService {
     private static final String INDEX_NAME = "products";
     private static final String FIELD_SKU = "sku.keyword";
     private static final String FIELD_CATEGORY = "category.keyword";
+
+    private static final String SERVICE_DEGRADED_MESSAGE =
+            "Product search service is temporarily degraded. Please try again shortly.";
 
     private final OpenSearchClient openSearchClient;
     private final ProductMapper productMapper;
@@ -50,7 +49,10 @@ public class ProductSearchService {
      * @param pageable pagination parameters
      * @return a page of matching products
      */
-    @CircuitBreaker(name = "openSearchService", fallbackMethod = "searchProductsFallback")
+    @CircuitBreaker(
+            name = "openSearchService",
+            fallbackMethod = "searchProductsFallback"
+    )
     public Page<ProductResponseDto> searchProducts(
             ProductSearchQueryDto queryDto,
             Pageable pageable
@@ -68,42 +70,39 @@ public class ProductSearchService {
         );
 
         try {
-            SearchResponse<ProductDocument> response =
-                    openSearchClient.search(
-                            request -> request
-                                    .index(INDEX_NAME)
-                                    .from(offset)
-                                    .size(pageable.getPageSize())
-                                    .query(query -> query.bool(bool -> {
-                                        String keyword = queryDto.getKeyword();
-                                        String category = queryDto.getCategory();
+            SearchResponse<ProductDocument> response = openSearchClient.search(
+                    request -> request
+                            .index(INDEX_NAME)
+                            .from(offset)
+                            .size(pageable.getPageSize())
+                            .query(query -> query.bool(bool -> {
+                                String keyword = normalize(queryDto.getKeyword());
+                                String category = normalize(queryDto.getCategory());
 
-                                        if (hasText(keyword)) {
-                                            bool.must(must -> must.multiMatch(
-                                                    multiMatch -> multiMatch
-                                                            .query(keyword.trim())
-                                                            .fields(
-                                                                    "name",
-                                                                    "description",
-                                                                    "sku"
-                                                            )
-                                            ));
-                                        }
+                                if (hasText(keyword)) {
+                                    bool.must(must -> must.multiMatch(
+                                            multiMatch -> multiMatch
+                                                    .query(keyword)
+                                                    .fields(
+                                                            "name",
+                                                            "description",
+                                                            "sku"
+                                                    )
+                                    ));
+                                }
 
-                                        if (hasText(category)) {
-                                            bool.filter(filter -> filter.term(
-                                                    term -> term
-                                                            .field(FIELD_CATEGORY)
-                                                            .value(FieldValue.of(
-                                                                    category.trim()
-                                                            ))
-                                            ));
-                                        }
+                                if (hasText(category)) {
+                                    bool.filter(filter -> filter.term(
+                                            term -> term
+                                                    .field(FIELD_CATEGORY)
+                                                    .value(FieldValue.of(category))
+                                    ));
+                                }
 
-                                        return bool;
-                                    })),
-                            ProductDocument.class
-                    );
+                                return bool;
+                            })),
+                    ProductDocument.class
+            );
 
             List<ProductResponseDto> products = response.hits()
                     .hits()
@@ -129,21 +128,18 @@ public class ProductSearchService {
     }
 
     /**
-     * Fallback method executed when {@link #searchProducts} encounters an open circuit breaker
-     * or prolonged OpenSearch outage.
-     *
-     * @param queryDto search criteria
-     * @param pageable pagination parameters
-     * @param exception the triggering exception or throwable
-     * @return an empty page or a degraded response
+     * Gracefully degrades search requests when OpenSearch is unavailable.
      */
     private Page<ProductResponseDto> searchProductsFallback(
             ProductSearchQueryDto queryDto,
             Pageable pageable,
-            Throwable exception
+            Throwable cause
     ) {
-        log.warn("Circuit breaker active for product search. Executing graceful degradation fallback. Reason: {}",
-                exception.getMessage());
+        log.warn(
+                "Product search fallback activated: {}",
+                cause.getMessage()
+        );
+
         return Page.empty(pageable);
     }
 
@@ -154,31 +150,40 @@ public class ProductSearchService {
      * @return product details
      */
     @Cacheable(key = "'id:' + #id")
-    @CircuitBreaker(name = "openSearchService", fallbackMethod = "getProductByIdFallback")
+    @CircuitBreaker(
+            name = "openSearchService",
+            fallbackMethod = "getProductByIdFallback"
+    )
     public ProductResponseDto getProductById(String id) {
-        validateIdentifier(id, "Product ID");
+        String productId = normalizeRequiredIdentifier(id, "Product ID");
 
-        ProductDocument document = findById(id)
+        ProductDocument document = findById(productId)
                 .orElseThrow(() -> new ResourceNotFoundException(
-                        "Product not found with ID: " + id
+                        "Product not found with ID: " + productId
                 ));
 
         return productMapper.toResponseDto(document);
     }
 
     /**
-     * Fallback method executed when {@link #getProductById} encounters an open circuit breaker.
-     * Note: When Redis caching is active, Spring Cache-Aside may intercept before hitting this fallback
-     * if the cache entry is warm.
-     *
-     * @param id product document ID
-     * @param exception the triggering exception or throwable
-     * @return throws a degraded service-unavailable runtime exception
+     * Preserves expected not-found responses instead of masking them as outages.
      */
-    private ProductResponseDto getProductByIdFallback(String id, Throwable exception) {
-        log.warn("Circuit breaker active for product lookup by ID [id: {}]. Reason: {}",
-                id, exception.getMessage());
-        throw new IllegalStateException("Product search service is temporarily degraded. Please try again shortly.", exception);
+    private ProductResponseDto getProductByIdFallback(
+            String id,
+            Throwable cause
+    ) {
+        if (cause instanceof ResourceNotFoundException notFound) {
+            throw notFound;
+        }
+
+        log.error(
+                "Product lookup by ID failed for '{}': {}",
+                id,
+                cause.getMessage(),
+                cause
+        );
+
+        throw new IllegalStateException(SERVICE_DEGRADED_MESSAGE, cause);
     }
 
     /**
@@ -188,29 +193,27 @@ public class ProductSearchService {
      * @return product details
      */
     @Cacheable(key = "'sku:' + #sku")
-    @CircuitBreaker(name = "openSearchService", fallbackMethod = "getProductBySkuFallback")
+    @CircuitBreaker(
+            name = "openSearchService",
+            fallbackMethod = "getProductBySkuFallback"
+    )
     public ProductResponseDto getProductBySku(String sku) {
-        validateIdentifier(sku, "SKU");
-
-        String normalizedSku = sku.trim();
+        String normalizedSku = normalizeRequiredIdentifier(sku, "SKU");
 
         log.debug("Looking up product by SKU: {}", normalizedSku);
 
         try {
-            SearchResponse<ProductDocument> response =
-                    openSearchClient.search(
-                            request -> request
-                                    .index(INDEX_NAME)
-                                    .size(1)
-                                    .query(query -> query.term(
-                                            term -> term
-                                                    .field(FIELD_SKU)
-                                                    .value(FieldValue.of(
-                                                            normalizedSku
-                                                    ))
-                                    )),
-                            ProductDocument.class
-                    );
+            SearchResponse<ProductDocument> response = openSearchClient.search(
+                    request -> request
+                            .index(INDEX_NAME)
+                            .size(1)
+                            .query(query -> query.term(
+                                    term -> term
+                                            .field(FIELD_SKU)
+                                            .value(FieldValue.of(normalizedSku))
+                            )),
+                    ProductDocument.class
+            );
 
             return response.hits()
                     .hits()
@@ -225,7 +228,7 @@ public class ProductSearchService {
 
         } catch (IOException exception) {
             throw openSearchFailure(
-                    "SKU lookup failed",
+                    "SKU lookup failed for " + normalizedSku,
                     "Product lookup is temporarily unavailable.",
                     exception
             );
@@ -233,25 +236,31 @@ public class ProductSearchService {
     }
 
     /**
-     * Fallback method executed when {@link #getProductBySku} encounters an open circuit breaker.
-     *
-     * @param sku product stock keeping unit
-     * @param exception the triggering exception or throwable
-     * @return throws a degraded service-unavailable runtime exception
+     * Handles SKU lookup failures without masking expected not-found responses.
      */
-    private ProductResponseDto getProductBySkuFallback(String sku, Throwable exception) {
-        log.warn("Circuit breaker active for product lookup by SKU [sku: {}]. Reason: {}",
-                sku, exception.getMessage());
-        throw new IllegalStateException("Product search service is temporarily degraded. Please try again shortly.", exception);
+    private ProductResponseDto getProductBySkuFallback(
+            String sku,
+            Throwable cause
+    ) {
+        if (cause instanceof ResourceNotFoundException notFound) {
+            throw notFound;
+        }
+
+        log.error(
+                "Product lookup fallback activated for SKU '{}': {}",
+                sku,
+                cause.getMessage(),
+                cause
+        );
+
+        throw new IllegalStateException(SERVICE_DEGRADED_MESSAGE, cause);
     }
 
     /**
      * Creates or replaces a product document in OpenSearch.
      * Intended for use by the Kafka event consumer.
-     *
-     * @param document product document to index
      */
-    @CacheEvict(allEntries = true)
+    @CacheEvict(value = "products", allEntries = true)
     public void indexProduct(ProductDocument document) {
         validateDocument(document);
 
@@ -283,31 +292,29 @@ public class ProductSearchService {
     /**
      * Deletes a product document from OpenSearch.
      * Intended for use by the Kafka event consumer.
-     *
-     * @param id product document ID
      */
-    @CacheEvict(allEntries = true)
+    @CacheEvict(value = "products", key = "'id:' + #id")
     public void deleteProductIndex(String id) {
-        validateIdentifier(id, "Product ID");
+        String productId = normalizeRequiredIdentifier(id, "Product ID");
 
         try {
             DeleteRequest request = DeleteRequest.of(
                     delete -> delete
                             .index(INDEX_NAME)
-                            .id(id)
+                            .id(productId)
             );
 
             openSearchClient.delete(request);
 
             log.info(
                     "Deleted product ID {} from OpenSearch index {}",
-                    id,
+                    productId,
                     INDEX_NAME
             );
 
         } catch (IOException exception) {
             throw openSearchFailure(
-                    "Product deletion failed for ID " + id,
+                    "Product deletion failed for ID " + productId,
                     "Product deletion failed.",
                     exception
             );
@@ -318,19 +325,18 @@ public class ProductSearchService {
      * Finds a product document by ID.
      *
      * @param id product document ID
-     * @return empty if the document does not exist
+     * @return an empty optional if the document does not exist
      */
     public Optional<ProductDocument> findById(String id) {
-        validateIdentifier(id, "Product ID");
+        String productId = normalizeRequiredIdentifier(id, "Product ID");
 
         try {
-            GetResponse<ProductDocument> response =
-                    openSearchClient.get(
-                            request -> request
-                                    .index(INDEX_NAME)
-                                    .id(id),
-                            ProductDocument.class
-                    );
+            GetResponse<ProductDocument> response = openSearchClient.get(
+                    request -> request
+                            .index(INDEX_NAME)
+                            .id(productId),
+                    ProductDocument.class
+            );
 
             return response.found()
                     ? Optional.ofNullable(response.source())
@@ -338,7 +344,7 @@ public class ProductSearchService {
 
         } catch (IOException exception) {
             throw openSearchFailure(
-                    "Product retrieval failed for ID " + id,
+                    "Product retrieval failed for ID " + productId,
                     "Product retrieval is temporarily unavailable.",
                     exception
             );
@@ -386,15 +392,27 @@ public class ProductSearchService {
             );
         }
 
-        validateIdentifier(document.getId(), "Product document ID");
+        normalizeRequiredIdentifier(
+                document.getId(),
+                "Product document ID"
+        );
     }
 
-    private void validateIdentifier(String value, String fieldName) {
+    private String normalizeRequiredIdentifier(
+            String value,
+            String fieldName
+    ) {
         if (!hasText(value)) {
             throw new IllegalArgumentException(
                     fieldName + " must not be null or blank."
             );
         }
+
+        return value.trim();
+    }
+
+    private String normalize(String value) {
+        return value == null ? null : value.trim();
     }
 
     private boolean hasText(String value) {
