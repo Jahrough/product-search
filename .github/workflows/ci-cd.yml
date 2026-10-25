@@ -47,6 +47,14 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Cache Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: .cache/trivy
+          key: ${{ runner.os }}-trivy-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-trivy-
+
       - name: Build Local Docker Image for Scanning
         run: docker build -t product-search:${{ github.sha }} .
 
@@ -59,10 +67,12 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
+        env:
+          TRIVY_CACHE_DIR: .cache/trivy
 
       - name: Upload Trivy scan results to GitHub Security tab
         if: always() && hashFiles('trivy-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
 
@@ -74,6 +84,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write # Required for keyless signing with Cosign / Sigstore
 
     steps:
       - name: Checkout Code
@@ -102,3 +113,16 @@ jobs:
             .
 
           docker push "$LOWER_IMAGE_NAME" --all-tags
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.8.0
+
+      - name: Sign Published Container Image
+        env:
+          TAGS: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          LOWER_TAGS="$(echo "$TAGS" | tr '[:upper:]' '[:lower:]')"
+          
+          # Sign the image using keyless OIDC identity bound to this GitHub repository run
+          cosign sign --yes "$LOWER_TAGS"
