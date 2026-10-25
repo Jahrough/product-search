@@ -2,6 +2,12 @@ spring:
   application:
     name: product-search-test
 
+  # Database Configuration for Test Containers & JPA
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    open-in-view: false
+
   # Redis Configuration for Caching Tests
   data:
     redis:
@@ -18,17 +24,35 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
       properties:
+        spring.json.value.default.type: dev.jahlopez.productsearch.event.ProductEvent
         spring.json.trusted.packages: "dev.jahlopez.productsearch.*,dev.jahlopez.productcatalog.event.*"
+        spring.json.use.type.headers: false
 
+# Application Domain Configurations
 app:
-  # OpenSearch URI for search integration and repository tests
   opensearch:
     uris: ${OPENSEARCH_URIS:http://localhost:9200}
+  kafka:
+    topic:
+      product-events: product-events
 
+# Resilience4j Circuit Breaker Test Configurations
+resilience4j:
+  circuitbreaker:
+    instances:
+      openSearchService:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        ignore-exceptions:
+          - dev.jahlopez.productsearch.exception.ResourceNotFoundException
+          - java.lang.IllegalStateException
+
+# Comprehensive Test Logging Levels
 logging:
   level:
-    # Enable verbose debugging for search service packages during test execution
     dev.jahlopez.productsearch: DEBUG
-    org.springframework.test: INFO
+    dev.jahlopez.productsearch.kafka: DEBUG
     org.springframework.kafka: DEBUG
+    org.springframework.test: INFO
     org.opensearch.client: DEBUG

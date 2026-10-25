@@ -15,11 +15,23 @@ import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.kafka.support.serializer.JacksonJsonSerializer;
 
 /**
- * Provides a typed Kafka producer for integration tests.
+ * Test configuration class providing Kafka producer beans specifically tailored
+ * for integration testing environments.
+ * <p>
+ * This configuration overrides production beans to supply a test-specific
+ * {@link KafkaTemplate} and {@link ProducerFactory} utilizing string serialization
+ * for keys and JSON serialization for {@link ProductEvent} payloads.
  */
 @TestConfiguration(proxyBeanMethods = false)
 public class KafkaTestProducerConfig {
 
+    /**
+     * Creates a Kafka producer factory configured for integration tests with string keys
+     * and JSON-serialized {@link ProductEvent} values.
+     *
+     * @param bootstrapServers the Kafka broker bootstrap servers address, injected from test properties
+     * @return a configured {@link ProducerFactory} instance for string keys and product event values
+     */
     @Bean
     public ProducerFactory<String, ProductEvent> productEventTestProducerFactory(
             @Value("${spring.kafka.bootstrap-servers}") String bootstrapServers
@@ -34,6 +46,13 @@ public class KafkaTestProducerConfig {
         );
     }
 
+    /**
+     * Defines the primary {@link KafkaTemplate} bean used to publish {@link ProductEvent}
+     * messages during integration tests.
+     *
+     * @param productEventTestProducerFactory the producer factory bean supplying connection and serialization settings
+     * @return a primary {@link KafkaTemplate} instance for test message publishing
+     */
     @Bean
     @Primary
     public KafkaTemplate<String, ProductEvent> kafkaTemplate(
