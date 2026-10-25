@@ -3,73 +3,82 @@ package dev.jahlopez.productsearch.config;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.cache.CacheManager;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Import;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
+import org.springframework.cache.CacheManager;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
-import java.time.Duration;
-
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Configuration test suite for Redis caching infrastructure.
- * <p>
- * Verifies that the {@link CacheManager}, Redis connection factories, and TTL / serialization
- * policies are correctly wired and initialized in the Spring container.
+ * Integration tests for {@link RedisCacheConfig}.
+ *
+ * <p>Starts a disposable Redis container and verifies that the application's
+ * Redis cache configuration can initialize and expose the expected caches.</p>
+ *
+ * <p>This test loads only the cache configuration and the Redis connection
+ * factory. It intentionally avoids starting the entire application, including
+ * unrelated database, Kafka, and search infrastructure.</p>
  */
-@SpringBootTest
+@SpringJUnitConfig(RedisCacheConfigTest.TestConfig.class)
 @Testcontainers
 class RedisCacheConfigTest {
 
-    private static final String REDIS_IMAGE = "redis:7.2-alpine";
-    private static final String POSTGRES_IMAGE = "postgres:15-alpine";
     private static final int REDIS_PORT = 6379;
 
     /**
-     * Redis Testcontainer for isolated distributed caching and key-value state validation.
-     */
-    @Container
-    private static final GenericContainer<?> REDIS_CONTAINER =
-            new GenericContainer<>(DockerImageName.parse(REDIS_IMAGE))
-                    .withExposedPorts(REDIS_PORT)
-                    .waitingFor(
-                            Wait.forListeningPort()
-                                    .withStartupTimeout(Duration.ofMinutes(1))
-                    );
-
-    /**
-     * PostgreSQL Testcontainer to support Spring Data JPA and Flyway migration bootstrapping
-     * during full application context initialization.
-     */
-    @Container
-    private static final PostgreSQLContainer<?> POSTGRES_CONTAINER =
-            new PostgreSQLContainer<>(DockerImageName.parse(POSTGRES_IMAGE));
-
-    /**
-     * Dynamically injects PostgreSQL datasource and Redis host/port connection parameters
-     * into the Spring Environment prior to context startup.
+     * Disposable Redis instance shared by the tests in this class.
      *
-     * @registry the dynamic property registry
+     * <p>Testcontainers maps the container port to an available host port,
+     * avoiding assumptions that Redis is running locally on port 6379.</p>
+     */
+    @Container
+    static final GenericContainer<?> REDIS_CONTAINER =
+            new GenericContainer<>(DockerImageName.parse("redis:7.2-alpine"))
+                    .withExposedPorts(REDIS_PORT);
+
+    /**
+     * Publishes the mapped Redis address for Spring's test environment.
+     *
+     * <p>These properties are useful to other Redis-aware components loaded
+     * by the test context. The connection factory below explicitly uses the
+     * same container address.</p>
      */
     @DynamicPropertySource
-    static void configureProperties(DynamicPropertyRegistry registry) {
-        // Database wiring for JPA and Flyway context dependencies
-        registry.add("spring.datasource.url", POSTGRES_CONTAINER::getJdbcUrl);
-        registry.add("spring.datasource.username", POSTGRES_CONTAINER::getUsername);
-        registry.add("spring.datasource.password", POSTGRES_CONTAINER::getPassword);
-        registry.add("spring.datasource.driver-class-name", POSTGRES_CONTAINER::getDriverClassName);
-
-        // Redis cache server host and dynamically mapped port
+    static void configureRedisProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.data.redis.host", REDIS_CONTAINER::getHost);
         registry.add("spring.data.redis.port", REDIS_CONTAINER::getFirstMappedPort);
+    }
+
+    /**
+     * Minimal Spring context for testing Redis caching in isolation.
+     */
+    @Configuration(proxyBeanMethods = false)
+    @Import(RedisCacheConfig.class)
+    static class TestConfig {
+
+        /**
+         * Creates a Redis connection factory targeting the Testcontainers
+         * Redis instance rather than a developer's local Redis installation.
+         *
+         * @return the configured Redis connection factory
+         */
+        @Bean
+        RedisConnectionFactory redisConnectionFactory() {
+            return new LettuceConnectionFactory(
+                    REDIS_CONTAINER.getHost(),
+                    REDIS_CONTAINER.getFirstMappedPort()
+            );
+        }
     }
 
     @Autowired
@@ -78,18 +87,26 @@ class RedisCacheConfigTest {
     @Autowired
     private RedisConnectionFactory redisConnectionFactory;
 
-    /**
-     * Verifies that the Redis cache manager and connection factory beans are successfully created
-     * and configured in the application context.
-     */
     @Test
-    @DisplayName("Should correctly configure Redis cache manager and connection factory beans")
-    void shouldConfigureRedisCacheBeans() {
-        // Assert: Ensure core caching infrastructure beans are successfully wired
+    @DisplayName("Should initialize the Redis cache manager and connection factory")
+    void shouldInitializeRedisCacheInfrastructure() {
         assertThat(cacheManager).isNotNull();
         assertThat(redisConnectionFactory).isNotNull();
+    }
 
-        // Verify that default or named cache configurations are accessible and populated
-        assertThat(cacheManager.getCacheNames()).isNotEmpty();
+    @Test
+    @DisplayName("Should expose all configured product caches")
+    void shouldExposeExpectedProductCaches() {
+        assertThat(cacheManager.getCache(RedisCacheConfig.PRODUCTS_BY_ID_CACHE))
+                .as("cache for product ID lookups")
+                .isNotNull();
+
+        assertThat(cacheManager.getCache(RedisCacheConfig.PRODUCTS_BY_SKU_CACHE))
+                .as("cache for SKU lookups")
+                .isNotNull();
+
+        assertThat(cacheManager.getCache(RedisCacheConfig.PRODUCTS_LIST_CACHE))
+                .as("cache for product lists and search results")
+                .isNotNull();
     }
 }

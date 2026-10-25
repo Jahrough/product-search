@@ -1,22 +1,26 @@
 package dev.jahlopez.productsearch.controller;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.jahlopez.productsearch.dto.ProductResponseDto;
 import dev.jahlopez.productsearch.dto.ProductSearchQueryDto;
 import dev.jahlopez.productsearch.exception.GlobalExceptionHandler;
 import dev.jahlopez.productsearch.exception.ResourceNotFoundException;
 import dev.jahlopez.productsearch.service.ProductSearchService;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
-import org.springframework.context.annotation.Import;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.web.PageableHandlerMethodArgumentResolver;
 import org.springframework.http.MediaType;
+import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
+import tools.jackson.databind.json.JsonMapper;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -29,19 +33,34 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@WebMvcTest(ProductSearchController.class)
-@Import(GlobalExceptionHandler.class)
-@DisplayName("Product Search Controller Tests")
+@ExtendWith(MockitoExtension.class)
+@DisplayName("Product Search Controller Unit Tests")
 class ProductSearchControllerTest {
 
-    @Autowired
     private MockMvc mockMvc;
 
-    @Autowired
-    private ObjectMapper objectMapper;
+    private JsonMapper objectMapper;
 
-    @MockBean
+    @Mock
     private ProductSearchService productSearchService;
+
+    @InjectMocks
+    private ProductSearchController productSearchController;
+
+    @BeforeEach
+    void setUp() {
+        // Jackson 3 supports java.time natively and writes dates as ISO strings by default,
+        // so no JavaTimeModule or SerializationFeature is needed.
+        objectMapper = JsonMapper.builder().build();
+
+        var converter = new JacksonJsonHttpMessageConverter(objectMapper);
+
+        mockMvc = MockMvcBuilders.standaloneSetup(productSearchController)
+                .setControllerAdvice(new GlobalExceptionHandler())
+                .setCustomArgumentResolvers(new PageableHandlerMethodArgumentResolver())
+                .setMessageConverters(converter)
+                .build();
+    }
 
     @Nested
     @DisplayName("Search endpoints")
@@ -70,6 +89,8 @@ class ProductSearchControllerTest {
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/products/search")
+                            .param("page", "0")
+                            .param("size", "10")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(queryDto)))
                     .andExpect(status().isOk())
