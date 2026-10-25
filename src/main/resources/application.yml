@@ -1,16 +1,16 @@
 server:
   port: 8081
 
-app:
-  opensearch:
-    uris: ${OPENSEARCH_URIS:http://localhost:9200}
-  kafka:
-    topic:
-      product-events: "product-events"
-
 spring:
   application:
     name: product-search
+
+  # JPA & Database Configuration
+  jpa:
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
 
   # Redis Configuration for Query Caching
   data:
@@ -19,7 +19,7 @@ spring:
       port: ${REDIS_PORT:6379}
       timeout: 2000ms
 
-  # Kafka Consumer Configuration
+  # Kafka Configuration
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     consumer:
@@ -28,8 +28,30 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
       properties:
-        spring.json.trusted.packages: "dev.jahlopez.productsearch.*,dev.jahlopez.productcatalog.event.*"
-        spring.json.value.default.type: "dev.jahlopez.productsearch.event.ProductEvent"
+        spring.json.value.default.type: dev.jahlopez.productsearch.event.ProductEvent
+        spring.json.trusted.packages: dev.jahlopez.productsearch.event
+
+# Application Domain Configurations
+app:
+  opensearch:
+    uris: ${OPENSEARCH_URIS:http://localhost:9200}
+  kafka:
+    topic:
+      product-events: product-events
+
+# Resilience4j Fault Tolerance Configurations
+resilience4j:
+  circuitbreaker:
+    instances:
+      openSearchService:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 5000ms
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        ignore-exceptions:
+          - dev.jahlopez.productsearch.exception.ResourceNotFoundException
 
 # SpringDoc OpenAPI / Swagger UI Configuration
 springdoc:
