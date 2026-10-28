@@ -52,6 +52,7 @@ dependencies {
 
     // Kafka event consumption
     implementation("org.springframework.kafka:spring-kafka")
+    implementation("com.networknt:json-schema-validator:3.0.5")
 
     // OpenSearch client and REST transport
     implementation("org.opensearch.client:opensearch-java:$openSearchVersion")
