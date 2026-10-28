@@ -1,10 +1,18 @@
 # Product Search
 
-Product Search is a Java/Spring Boot microservice that builds and serves a
-search projection of a product catalog. It consumes lifecycle events from
-Kafka, indexes product documents in OpenSearch, stores processed-event metadata
-in PostgreSQL, and exposes a paginated REST API. Redis provides response
-caching.
+`product-search` is an event-driven read-model projection service for the
+product catalog. It consumes product mutation events from Kafka, validates
+them against a versioned JSON Schema and consumer-side invariants, and
+maintains product search documents in OpenSearch. A PostgreSQL inbox tracks
+processed event IDs and aggregate versions; Redis provides rebuildable API
+response caching.
+
+The catalog remains the source of truth. Product writes, the transactional
+outbox, and Debezium CDC are upstream responsibilities of `product-catalog`
+and the platform repositories (`platform-infrastructure` and
+`platform-gitops`). This service owns the Kafka consumer, inbox, search
+projection, API, and DLT logging—not outbox publication or connector
+deployment.
 
 > **Production security notice:** This application does not enforce
 > authentication or authorization. OpenAPI security annotations are
@@ -19,6 +27,7 @@ caching.
 - [Project structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Configuration](#configuration)
+- [Getting started](#getting-started)
 - [Run locally](#run-locally)
 - [Docker](#docker)
 - [API](#api)
@@ -50,15 +59,19 @@ flowchart LR
     Cache -. cache miss .-> SearchIndex
 ```
 
-The upstream product service remains the system of record and publishes
-authoritative events. OpenSearch is the read/search projection, Redis is a
-rebuildable cache, and PostgreSQL stores the consumer inbox used for event
-deduplication and version checks. Both source-topic consumer groups receive
-events independently. The indexing listener updates OpenSearch and records
-processed-event metadata; its writes to these two systems are not atomic.
-Failed listener records are retried before routing to the DLT, where a
-separate listener logs them for operator handling. Flyway applies the
-PostgreSQL migration at application startup.
+The upstream catalog publishes authoritative events to Kafka using a
+transactional outbox and Debezium CDC. OpenSearch is the read/search
+projection, Redis is a rebuildable cache, and PostgreSQL stores the consumer
+inbox used for idempotency and aggregate-version checks. The general
+processing and indexing listeners use separate consumer groups and receive
+events independently. The indexing listener applies deterministic document
+upserts/deletes and records inbox metadata; OpenSearch and PostgreSQL cannot
+commit atomically. Flyway applies the inbox migration at application startup.
+
+Listener failures are retried before a `DeadLetterPublishingRecoverer` routes
+the record to `<source-topic>.DLT`. The DLT listener consumes raw bytes and
+logs the failure; it does not repair or replay the projection. Failed
+deserialization payload bytes are preserved when publishing to the DLT.
 
 ### Product event contract
 
@@ -83,23 +96,34 @@ of `ProductEvent`:
 
 The checked-in JSON Schema at
 `src/main/resources/schemas/product-event-v1.schema.json` is enforced by the
-Kafka value deserializer before application listeners receive events. Schema
-version `1` is required; unsupported versions and incompatible payloads fail
-deserialization and are routed through the existing retry/dead-letter flow.
-The schema is versioned in the repository; this does not use a Schema Registry.
+Kafka value deserializer before application listeners receive events.
+`schemaVersion` must be `1`; `version` is a required integer with a minimum
+value of `1`. Unsupported schema versions, malformed JSON, and incompatible
+payloads fail deserialization and enter the retry/dead-letter flow. This
+repository versions the schema in source control; it does not use a Schema
+Registry.
 
-`eventType` is `CREATED`, `UPDATED`, or `DELETED`. For indexing, `eventId`,
-`productId`, and `eventType` must be present. Producers should supply a unique
-UUID event ID and monotonically increasing product version. Create/update
-events need the product fields; deletion is performed by `productId`. The
-timestamp is descriptive and is not used for ordering.
+`eventType` is `CREATED`, `UPDATED`, or `DELETED`. All events require a UUID
+`eventId`, positive numeric `productId`, positive integer `version`, event
+type, and timestamp. Create/update events also require nonblank SKU and name,
+nonnegative price, and nonnegative stock quantity. Delete events are applied
+by product ID. The timestamp is descriptive and is not used for ordering.
+
+The consumer rejects incoming versions less than or equal to the highest
+version in the inbox or (for indexed documents) OpenSearch. It does not treat a
+missing version as zero or silently acknowledge stale/equal aggregate
+versions. An already-recorded `eventId` is an idempotent duplicate and is
+acknowledged without repeating side effects. Invalid payloads, including null
+events or missing required fields, fail explicitly so Kafka recovery can
+retry and route them to the DLT.
 
 Listener failures are retried three times with a one-second backoff after the
 initial attempt. After retries, records are published to
-`<source-topic>.DLT` at the original partition number. The DLT listener logs
-failures but does not repair or replay them. The general processing listener,
-indexing listener, and DLT listener use separate consumer groups, so each group
-receives the relevant topic independently.
+`<source-topic>.DLT` at the original partition number. OpenSearch indexing and
+inbox persistence form a non-atomic boundary: if indexing succeeds but inbox
+save fails, the exception propagates for Kafka retry. Re-delivery must remain
+a deterministic upsert/delete; do not rely on a Redis cache entry for
+deduplication.
 
 ### CDC outbox integration contract
 
@@ -200,16 +224,18 @@ byte-preserving DLT routing.
 
 ## Technology stack
 
-- Java 21
+- OpenJDK 25 to run the Gradle wrapper and tests; Java 21 Gradle compilation
+  toolchain (see [Prerequisites](#prerequisites))
+- Gradle Wrapper 9.2.1
 - Spring Boot 4 and Spring Framework
-- Gradle
-- OpenSearch Java client
-- Apache Kafka and Spring Kafka
-- PostgreSQL, Spring Data JPA, and Flyway
+- Spring Kafka and Apache Kafka
+- Spring Data JPA, PostgreSQL, and Flyway
+- OpenSearch Java Client
 - Redis and Spring Cache
 - Spring Boot Actuator, Micrometer, Prometheus, and OpenTelemetry tracing
 - Springdoc OpenAPI and Swagger UI
-- JUnit 5 and Testcontainers
+- JUnit 5, Mockito, AssertJ, and Testcontainers (PostgreSQL, Kafka,
+  OpenSearch, and Redis)
 
 ## Project structure
 
@@ -230,6 +256,7 @@ byte-preserving DLT routing.
 │   │   │   └── service/      # Search and indexing operations
 │   │   └── resources
 │   │       ├── db/migration/ # Flyway migrations
+│   │       ├── schemas/      # Versioned Kafka product-event JSON Schema
 │   │       └── application.yml
 │   └── test
 │       ├── java/             # Unit and integration tests
@@ -242,8 +269,12 @@ byte-preserving DLT routing.
 
 ## Prerequisites
 
-- JDK 21 to run or build from source.
-- Docker for Testcontainers integration tests.
+- OpenJDK 25 to run the requested Gradle commands and test suite.
+- Java 21 toolchain for compilation, as configured in `build.gradle.kts`.
+  Gradle may use an installed matching toolchain or provision one if toolchain
+  download is configured.
+- Docker for Testcontainers integration tests (PostgreSQL, Kafka, OpenSearch,
+  and Redis).
 - Reachable PostgreSQL, Kafka, OpenSearch, and Redis services.
 - An OpenSearch index named `products`.
 - Kafka source topic `product-events` and DLT `product-events.DLT`.
@@ -301,6 +332,38 @@ The application does not configure Redis or OpenSearch credentials. Do not
 assume that environment variables alone enable authentication. Use private
 networking and platform controls, or implement and verify client authentication
 support before using secured clusters.
+
+## Getting started
+
+From a fresh checkout, confirm the JDK versions and run the complete
+verification build:
+
+```bash
+java -version
+./gradlew --version
+JAVA_HOME=$(/usr/libexec/java_home -v 25) ./gradlew clean build --no-configuration-cache
+```
+
+The last command is the project's full clean build and test-suite command on
+macOS. On other operating systems, set `JAVA_HOME` to the installed JDK 25
+path before invoking `./gradlew`. The Gradle wrapper selects Gradle 9.2.1.
+The build's Java compilation toolchain is currently 21; running Gradle itself
+on JDK 25 does not change that compiler target.
+
+Run an individual test class or the core consumer and schema-deserializer
+tests with:
+
+```bash
+JAVA_HOME=$(/usr/libexec/java_home -v 25) ./gradlew test \
+  --tests 'dev.jahlopez.productsearch.listener.ProductEventConsumerTest' \
+  --tests 'dev.jahlopez.productsearch.config.ProductEventJsonDeserializerTest' \
+  --no-configuration-cache
+```
+
+Unit tests use JUnit 5, Mockito, and AssertJ. Integration tests start
+PostgreSQL, Kafka, OpenSearch, and Redis using Testcontainers, so Docker must
+be running. JaCoCo reports are written under
+`build/reports/jacoco/test/`.
 
 ## Run locally
 
@@ -413,15 +476,33 @@ documentation as an access-control mechanism.
 
 ## Testing
 
-Run the Gradle build and tests:
+Run the clean build and full test suite with JDK 25:
 
 ```bash
-./gradlew build
-./gradlew test
+JAVA_HOME=$(/usr/libexec/java_home -v 25) ./gradlew clean build --no-configuration-cache
 ```
 
-Integration tests use Testcontainers and require Docker. JaCoCo reports are
-generated under `build/reports/jacoco/test/`.
+To run just the consumer unit tests:
+
+```bash
+JAVA_HOME=$(/usr/libexec/java_home -v 25) ./gradlew test \
+  --tests 'dev.jahlopez.productsearch.listener.ProductEventConsumerTest' \
+  --no-configuration-cache
+```
+
+The Kafka schema contract is covered separately by
+`ProductEventJsonDeserializerTest`. Integration tests use Testcontainers and
+require Docker. The integration classes that own Testcontainers activate the
+`test` Spring profile and mark their context dirty after the class. This closes
+the Spring/JPA context before JUnit stops its containers. The test profile
+uses Hibernate `create` rather than `create-drop` and bounds Hikari connection
+and validation waits, avoiding shutdown-time DDL against an already-stopped
+PostgreSQL container. Do not remove the profile/context lifecycle annotations
+without verifying container shutdown order.
+
+For CI-like verification without Gradle's configuration cache, retain
+`--no-configuration-cache` in the commands above. JaCoCo reports are generated
+under `build/reports/jacoco/test/`.
 
 ## Observability and health
 
