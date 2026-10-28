@@ -42,31 +42,67 @@ deployment.
 
 ```mermaid
 flowchart LR
-    Producer[Product event source] --> Events[Kafka: product-events]
+    subgraph upstream["Upstream Publishers"]
+        direction LR
+        catalog["Product Catalog<br/>transactional product write"]
+        outbox[("PostgreSQL<br/>Outbox table")]
+        debezium["Debezium<br/>CDC / Outbox Event Router"]
+        catalog -->|"same transaction"| outbox
+        outbox -->|"WAL change stream"| debezium
+    end
 
-    Events --> General[General listener<br/>group: product-search-group]
-    Events --> Indexer[Indexing listener<br/>group: product-search-search-group]
-    Indexer --> Inbox[(PostgreSQL<br/>processed_events)]
-    Indexer --> SearchIndex[(OpenSearch<br/>products index)]
+    subgraph broker["Message Broker"]
+        direction TB
+        events[("Kafka topic<br/>product-events")]
+        dlt[("Kafka topic<br/>product-events.DLT")]
+    end
 
-    General -. listener failure after retries .-> DLT[Kafka: product-events.DLT]
-    Indexer -. listener failure after retries .-> DLT
-    DLT --> DltListener[DLT logging listener<br/>group: product-search-dlq-group]
+    subgraph projection["Projection Service — product-search"]
+        direction TB
+        deserialize["JSON deserializer<br/>JSON Schema validation"]
+        listeners["ProductEventConsumer<br/>required-field validation"]
+        guards["Inbox idempotency check<br/>strict aggregate-version guard"]
+        retries["DefaultErrorHandler<br/>3 retries · 1-second backoff"]
+        dltListener["DLT listener<br/>raw-byte logging"]
+        api["REST API"]
+    end
 
-    Client[API clients] --> API[REST API]
-    API -->|Search| SearchIndex
-    API -->|ID/SKU lookup| Cache[(Redis cache)]
-    Cache -. cache miss .-> SearchIndex
+    subgraph storage["Storage & Caching"]
+        direction TB
+        inbox[("PostgreSQL Inbox<br/>processed_events")]
+        search[("OpenSearch<br/>products index")]
+        redis[("Redis Cache<br/>API responses")]
+    end
+
+    clients["API clients"]
+
+    debezium -->|"keyed product event"| events
+    events --> deserialize
+    deserialize --> listeners
+    listeners --> guards
+    guards <-->|"duplicate / max version lookup"| inbox
+    guards -->|"newer event: upsert or delete"| search
+    search -->|"record successful processing"| inbox
+
+    deserialize -. "malformed payload" .-> retries
+    listeners -. "invalid, stale, or processing failure" .-> retries
+    retries -. "retries exhausted; preserve payload bytes" .-> dlt
+    dlt --> dltListener
+
+    clients --> api
+    api -->|"search / cache miss"| search
+    api <-->|"ID / SKU cache lookup"| redis
 ```
 
-The upstream catalog publishes authoritative events to Kafka using a
-transactional outbox and Debezium CDC. OpenSearch is the read/search
-projection, Redis is a rebuildable cache, and PostgreSQL stores the consumer
-inbox used for idempotency and aggregate-version checks. The general
-processing and indexing listeners use separate consumer groups and receive
-events independently. The indexing listener applies deterministic document
-upserts/deletes and records inbox metadata; OpenSearch and PostgreSQL cannot
-commit atomically. Flyway applies the inbox migration at application startup.
+Solid arrows show the normal event and query paths; dashed arrows show
+failures routed through retries to the DLT. The upstream publisher chain is
+the integration contract: outbox publishing and Debezium deployment are
+owned by `product-catalog` and the platform repositories. Within this service,
+the general processing and indexing listeners use separate consumer groups
+and receive events independently. The indexing listener applies deterministic
+document upserts/deletes and records inbox metadata; OpenSearch and PostgreSQL
+cannot commit atomically. Flyway applies the inbox migration at application
+startup.
 
 Listener failures are retried before a `DeadLetterPublishingRecoverer` routes
 the record to `<source-topic>.DLT`. The DLT listener consumes raw bytes and
