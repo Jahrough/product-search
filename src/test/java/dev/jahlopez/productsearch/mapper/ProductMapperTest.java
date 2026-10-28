@@ -93,9 +93,10 @@ class ProductMapperTest {
     void shouldMapEventToDocument() {
         // Arrange: Construct sample Kafka lifecycle event payload
         ProductEvent event = ProductEvent.builder()
+                .schemaVersion(1)
                 .eventId(UUID.randomUUID())
                 .version(2L)
-                .productId("prod-789")
+                .productId(789L)
                 .sku("SKU-MAP-01")
                 .name("Mechanical Keyboard")
                 .description("Hot-swappable mechanical keyboard")
@@ -110,7 +111,7 @@ class ProductMapperTest {
 
         // Assert: Validate event attributes correctly map to document fields
         assertThat(document).isNotNull();
-        assertThat(document.getId()).isEqualTo(event.productId());
+        assertThat(document.getId()).isEqualTo(event.productId().toString());
         assertThat(document.getSku()).isEqualTo(event.sku());
         assertThat(document.getName()).isEqualTo(event.name());
         assertThat(document.getVersion()).isEqualTo(event.version());

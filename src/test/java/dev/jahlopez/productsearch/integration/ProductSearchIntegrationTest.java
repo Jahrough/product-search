@@ -25,6 +25,8 @@ import org.springframework.kafka.support.serializer.JacksonJsonSerializer;
 import org.springframework.kafka.test.utils.ContainerTestUtils;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.annotation.DirtiesContext;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -45,13 +47,15 @@ import static org.awaitility.Awaitility.await;
  */
 @SpringBootTest
 @Testcontainers
+@ActiveProfiles("test")
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @Import(KafkaTestProducerConfig.class)
 class ProductSearchIntegrationTest {
 
     private static final String MAIN_TOPIC = "product-events";
     private static final String INDEX_NAME = "products";
 
-    private static final String TEST_PRODUCT_ID = "prod-12345";
+    private static final Long TEST_PRODUCT_ID = 12345L;
     private static final String TEST_SKU = "SRCH-HUB-01";
     private static final String TEST_PRODUCT_NAME =
             "Wireless Mechanical Gaming Keyboard";
@@ -95,7 +99,7 @@ class ProductSearchIntegrationTest {
     private OpenSearchClient openSearchClient;
 
     @Autowired
-    private KafkaTemplate<String, ProductEvent> kafkaTemplate;
+    private KafkaTemplate<String, Object> kafkaTemplate;
 
     @Autowired
     private KafkaListenerEndpointRegistry endpointRegistry;
@@ -116,7 +120,7 @@ class ProductSearchIntegrationTest {
                 "spring.datasource.driver-class-name",
                 postgres::getDriverClassName
         );
-        registry.add("spring.jpa.hibernate.ddl-auto", () -> "create-drop");
+        registry.add("spring.jpa.hibernate.ddl-auto", () -> "create");
 
         registry.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
         registry.add(
@@ -131,11 +135,6 @@ class ProductSearchIntegrationTest {
                 "spring.kafka.consumer.auto-offset-reset",
                 () -> "earliest"
         );
-        registry.add(
-                "spring.kafka.consumer.properties.spring.json.use.type.headers",
-                () -> "false"
-        );
-
         registry.add("app.opensearch.uris", opensearch::getHttpHostAddress);
 
         // Prevent ResourceNotFoundException and IllegalStateException from tripping the circuit breaker during polling
@@ -177,10 +176,10 @@ class ProductSearchIntegrationTest {
 
                     try {
                         ProductResponseDto fetched =
-                                productSearchService.getProductById(TEST_PRODUCT_ID);
+                                productSearchService.getProductById(TEST_PRODUCT_ID.toString());
 
                         assertThat(fetched).isNotNull();
-                        assertThat(fetched.getId()).isEqualTo(TEST_PRODUCT_ID);
+                        assertThat(fetched.getId()).isEqualTo(TEST_PRODUCT_ID.toString());
                         assertThat(fetched.getSku()).isEqualTo(TEST_SKU);
                         assertThat(fetched.getName()).isEqualTo(TEST_PRODUCT_NAME);
                     } catch (ResourceNotFoundException e) {
@@ -221,6 +220,7 @@ class ProductSearchIntegrationTest {
 
     private ProductEvent createProductCreatedEvent() {
         return ProductEvent.builder()
+                .schemaVersion(1)
                 .eventId(UUID.randomUUID())
                 .version(1L)
                 .productId(TEST_PRODUCT_ID)

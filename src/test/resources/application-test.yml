@@ -3,9 +3,13 @@ spring:
     name: product-search-test
 
   # Database Configuration for Test Containers & JPA
+  datasource:
+    hikari:
+      connection-timeout: 5000
+      validation-timeout: 1000
   jpa:
     hibernate:
-      ddl-auto: create-drop
+      ddl-auto: create
     open-in-view: false
 
   # Redis Configuration for Caching Tests
@@ -21,12 +25,6 @@ spring:
     consumer:
       group-id: product-search-test-group
       auto-offset-reset: earliest
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
-      properties:
-        spring.json.value.default.type: dev.jahlopez.productsearch.event.ProductEvent
-        spring.json.trusted.packages: "dev.jahlopez.productsearch.*,dev.jahlopez.productcatalog.event.*"
-        spring.json.use.type.headers: false
 
 # Application Domain Configurations
 app:
@@ -54,5 +52,6 @@ logging:
     dev.jahlopez.productsearch: DEBUG
     dev.jahlopez.productsearch.kafka: DEBUG
     org.springframework.kafka: DEBUG
+    org.apache.kafka: INFO
     org.springframework.test: INFO
     org.opensearch.client: DEBUG

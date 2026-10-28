@@ -6,6 +6,7 @@ import dev.jahlopez.productsearch.service.ProductSearchService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.opensearch.client.opensearch.OpenSearchClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -19,7 +20,9 @@ import org.springframework.data.redis.serializer.RedisSerializer;
 import org.springframework.data.redis.serializer.SerializationException;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.annotation.DirtiesContext;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
@@ -44,6 +47,8 @@ import static org.awaitility.Awaitility.await;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @Testcontainers
+@ActiveProfiles("test")
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @TestPropertySource(properties = "spring.main.allow-bean-definition-overriding=true")
 class ProductSearchCacheIntegrationTest {
 
@@ -59,6 +64,7 @@ class ProductSearchCacheIntegrationTest {
 
     // Matches ProductSearchService's @Cacheable(key = "'id:' + #id") expression.
     private static final String PRODUCT_ID_CACHE_KEY = "id:" + PRODUCT_ID;
+    private static final String PRODUCT_SKU_CACHE_KEY = "sku:" + PRODUCT_SKU;
 
     /**
      * Redis Testcontainer for caching layer validation.
@@ -196,6 +202,9 @@ class ProductSearchCacheIntegrationTest {
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
 
+    @Autowired
+    private OpenSearchClient openSearchClient;
+
     private ProductDocument sampleDocument;
 
     @BeforeEach
@@ -240,10 +249,12 @@ class ProductSearchCacheIntegrationTest {
      */
     @Test
     @DisplayName("Should evict the product cache entry when its index is deleted")
-    void shouldEvictCacheWhenProductIsDeleted() {
+    void shouldEvictCacheWhenProductIsDeleted() throws Exception {
         // Arrange: Index product and populate cache
         productSearchService.indexProduct(sampleDocument);
+        openSearchClient.indices().refresh(request -> request.index("products"));
         productSearchService.getProductById(PRODUCT_ID);
+        productSearchService.getProductBySku(PRODUCT_SKU);
 
         assertProductIsCached();
 
@@ -252,6 +263,7 @@ class ProductSearchCacheIntegrationTest {
 
         // Assert: Verify cache entry has been removed
         assertProductIsNotCached();
+        assertSkuIsNotCached();
     }
 
     /**
@@ -313,6 +325,20 @@ class ProductSearchCacheIntegrationTest {
                     Set<String> keys = stringRedisTemplate.keys("*" + PRODUCT_ID_CACHE_KEY);
                     assertThat(keys)
                             .as("Redis cache keys matching '*%s' should have been evicted", PRODUCT_ID_CACHE_KEY)
+                            .isNullOrEmpty();
+                });
+    }
+
+    /**
+     * Asserts that the SKU lookup cache key has been evicted from Redis.
+     */
+    private void assertSkuIsNotCached() {
+        await().atMost(Duration.ofSeconds(5))
+                .pollInterval(Duration.ofMillis(100))
+                .untilAsserted(() -> {
+                    Set<String> keys = stringRedisTemplate.keys("*" + PRODUCT_SKU_CACHE_KEY);
+                    assertThat(keys)
+                            .as("Redis cache keys matching '*%s' should have been evicted", PRODUCT_SKU_CACHE_KEY)
                             .isNullOrEmpty();
                 });
     }
