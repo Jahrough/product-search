@@ -25,11 +25,6 @@ spring:
     consumer:
       group-id: product-search-group
       auto-offset-reset: earliest
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
-      properties:
-        spring.json.value.default.type: dev.jahlopez.productsearch.event.ProductEvent
-        spring.json.trusted.packages: dev.jahlopez.productsearch.event
 
 # Application Domain Configurations
 app:
