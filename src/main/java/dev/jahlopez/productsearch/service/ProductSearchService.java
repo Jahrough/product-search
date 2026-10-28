@@ -293,7 +293,7 @@ public class ProductSearchService {
      * Deletes a product document from OpenSearch.
      * Intended for use by the Kafka event consumer.
      */
-    @CacheEvict(value = "products", key = "'id:' + #id")
+    @CacheEvict(value = "products", allEntries = true)
     public void deleteProductIndex(String id) {
         String productId = normalizeRequiredIdentifier(id, "Product ID");
 

@@ -6,6 +6,7 @@ import java.util.HashMap;
 import java.util.Map;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -17,7 +18,7 @@ import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
-import org.springframework.kafka.support.serializer.JacksonJsonDeserializer;
+import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
 import org.springframework.util.backoff.FixedBackOff;
 
 /**
@@ -60,15 +61,10 @@ public class KafkaConsumerConfig {
                 )
         );
 
-        // Deserialize event payloads to ProductEvent without relying on
-        // producer-supplied Java type headers.
-        JacksonJsonDeserializer<ProductEvent> valueDeserializer = new JacksonJsonDeserializer<>(ProductEvent.class);
-        valueDeserializer.setUseTypeHeaders(false);
-
         return new DefaultKafkaConsumerFactory<>(
                 properties,
                 new StringDeserializer(),
-                valueDeserializer
+                new ErrorHandlingDeserializer<>(new ProductEventJsonDeserializer())
         );
     }
 
@@ -84,6 +80,31 @@ public class KafkaConsumerConfig {
         factory.setConsumerFactory(consumerFactory);
         factory.setCommonErrorHandler(createErrorHandler(kafkaTemplate));
 
+        return factory;
+    }
+
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, byte[]>
+    deadLetterKafkaListenerContainerFactory(Environment environment) {
+        Map<String, Object> properties = new HashMap<>();
+        properties.put(
+                ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
+                environment.getRequiredProperty("spring.kafka.bootstrap-servers")
+        );
+        properties.put(
+                ConsumerConfig.AUTO_OFFSET_RESET_CONFIG,
+                environment.getProperty(
+                        "spring.kafka.consumer.auto-offset-reset",
+                        "earliest"
+                )
+        );
+
+        var factory = new ConcurrentKafkaListenerContainerFactory<String, byte[]>();
+        factory.setConsumerFactory(new DefaultKafkaConsumerFactory<>(
+                properties,
+                new StringDeserializer(),
+                new ByteArrayDeserializer()
+        ));
         return factory;
     }
 

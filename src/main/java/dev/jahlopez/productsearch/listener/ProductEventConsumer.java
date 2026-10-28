@@ -2,6 +2,7 @@ package dev.jahlopez.productsearch.listener;
 
 import dev.jahlopez.productsearch.document.ProductDocument;
 import dev.jahlopez.productsearch.event.ProductEvent;
+import dev.jahlopez.productsearch.mapper.ProductMapper;
 import dev.jahlopez.productsearch.repository.ProcessedEventEntity;
 import dev.jahlopez.productsearch.repository.ProcessedEventRepository;
 import dev.jahlopez.productsearch.service.ProductSearchService;
@@ -26,6 +27,7 @@ import java.util.UUID;
 public class ProductEventConsumer {
 
     private final ProductSearchService productSearchService;
+    private final ProductMapper productMapper;
     private final ProcessedEventRepository processedEventRepository;
 
     private static final String POISON_PILL_SKU = "POISON-PILL-SKU";
@@ -46,10 +48,7 @@ public class ProductEventConsumer {
             ProductEvent event,
             @Header(name = "kafka_offset", defaultValue = "0") long offset) {
 
-        if (event == null) {
-            log.warn("Received null ProductEvent payload at offset: {}", offset);
-            return;
-        }
+        validateEvent(event);
 
         // Idempotency check for general listener
         if (event.eventId() != null && processedEventRepository.existsById(event.eventId())) {
@@ -88,14 +87,11 @@ public class ProductEventConsumer {
             @Header(name = "kafka_receivedPartitionId", defaultValue = "0") int partition,
             @Header(name = "kafka_offset", defaultValue = "0") long offset) {
 
-        if (event == null || event.eventType() == null || event.productId() == null || event.eventId() == null) {
-            log.warn("Received invalid or incomplete ProductEvent payload for search indexing.");
-            return;
-        }
+        validateEvent(event);
 
         UUID eventId = event.eventId();
         String aggregateId = String.valueOf(event.productId());
-        long incomingVersion = event.version() != null ? event.version() : 0L;
+        long incomingVersion = event.version();
 
         log.info("Indexing ProductEvent [{}] (eventId={}, version={}) for productId: {} in OpenSearch",
                 event.eventType(), eventId, incomingVersion, aggregateId);
@@ -107,11 +103,14 @@ public class ProductEventConsumer {
         }
 
         // 2. Out-of-Order Check via Inbox Table
-        Long maxProcessedVersion = processedEventRepository.findHighestProcessedVersion(AGGREGATE_TYPE, aggregateId).orElse(0L);
-        if (incomingVersion <= maxProcessedVersion) {
-            log.warn("Stale or out-of-order event ignored: aggregateId={}, incomingVersion={}, currentMaxVersion={}",
-                    aggregateId, incomingVersion, maxProcessedVersion);
-            return;
+        Optional<Long> maxProcessedVersion =
+                processedEventRepository.findHighestProcessedVersion(AGGREGATE_TYPE, aggregateId);
+        if (maxProcessedVersion.isPresent() && incomingVersion <= maxProcessedVersion.get()) {
+            throw new IllegalStateException(
+                    "Stale or out-of-order product event: aggregateId=" + aggregateId
+                            + ", incomingVersion=" + incomingVersion
+                            + ", currentMaxVersion=" + maxProcessedVersion.get()
+            );
         }
 
         // 3. Fallback Document Version Guard in OpenSearch
@@ -119,12 +118,20 @@ public class ProductEventConsumer {
             Optional<ProductDocument> existingDocOpt = productSearchService.findById(aggregateId);
             if (existingDocOpt.isPresent()) {
                 ProductDocument existingDoc = existingDocOpt.get();
-                Long existingVersion = existingDoc.getVersion() != null ? existingDoc.getVersion() : 0L;
+                Long existingVersion = existingDoc.getVersion();
+                if (existingVersion == null) {
+                    throw new IllegalStateException(
+                            "Cannot verify product event version because the indexed document has no version: "
+                                    + aggregateId
+                    );
+                }
 
                 if (incomingVersion <= existingVersion) {
-                    log.warn("Stale event detected in OpenSearch document check for productId: {}. Incoming ({}) <= Existing ({}). Discarding event.",
-                            aggregateId, incomingVersion, existingVersion);
-                    return;
+                    throw new IllegalStateException(
+                            "Stale or out-of-order product event: aggregateId=" + aggregateId
+                                    + ", incomingVersion=" + incomingVersion
+                                    + ", currentOpenSearchVersion=" + existingVersion
+                    );
                 }
             }
         }
@@ -132,7 +139,7 @@ public class ProductEventConsumer {
         // 4. Process Indexing / Deletion Business Logic
         switch (event.eventType()) {
             case CREATED, UPDATED -> {
-                ProductDocument document = mapToDocument(event);
+                ProductDocument document = productMapper.toDocument(event);
                 productSearchService.indexProduct(document);
                 log.info("Successfully indexed product ID: {} (version: {}) in OpenSearch", aggregateId, incomingVersion);
             }
@@ -141,8 +148,9 @@ public class ProductEventConsumer {
                 log.info("Successfully removed product ID: {} from OpenSearch", aggregateId);
             }
             default -> {
-                log.warn("Unhandled event type [{}] encountered for productId: {}", event.eventType(), aggregateId);
-                return;
+                throw new IllegalArgumentException(
+                        "Unsupported product event type: " + event.eventType()
+                );
             }
         }
 
@@ -163,6 +171,44 @@ public class ProductEventConsumer {
         log.info("Recorded eventId={} in inbox table for aggregateId={}", eventId, aggregateId);
     }
 
+    private void validateEvent(ProductEvent event) {
+        if (event == null) {
+            throw new IllegalArgumentException("Product event payload must not be null.");
+        }
+        if (!Integer.valueOf(1).equals(event.schemaVersion())) {
+            throw new IllegalArgumentException("Product event schemaVersion must be 1.");
+        }
+        if (event.eventId() == null) {
+            throw new IllegalArgumentException("Product event eventId is required.");
+        }
+        if (event.version() == null || event.version() < 1) {
+            throw new IllegalArgumentException("Product event version must be greater than zero.");
+        }
+        if (event.productId() == null || event.productId() < 1) {
+            throw new IllegalArgumentException("Product event productId must be greater than zero.");
+        }
+        if (event.eventType() == null) {
+            throw new IllegalArgumentException("Product event eventType is required.");
+        }
+        if (event.timestamp() == null) {
+            throw new IllegalArgumentException("Product event timestamp is required.");
+        }
+        if (event.eventType() != ProductEvent.EventType.DELETED) {
+            if (event.sku() == null || event.sku().isBlank()) {
+                throw new IllegalArgumentException("Product SKU is required for create and update events.");
+            }
+            if (event.name() == null || event.name().isBlank()) {
+                throw new IllegalArgumentException("Product name is required for create and update events.");
+            }
+            if (event.price() == null || event.price().signum() < 0) {
+                throw new IllegalArgumentException("Product price must be non-negative for create and update events.");
+            }
+            if (event.stockQuantity() == null || event.stockQuantity() < 0) {
+                throw new IllegalArgumentException("Product stockQuantity must be non-negative for create and update events.");
+            }
+        }
+    }
+
     /**
      * Dedicated consumer listener to monitor, audit, and log messages landing in the Dead Letter Queue (DLT).
      *
@@ -171,31 +217,14 @@ public class ProductEventConsumer {
      */
     @KafkaListener(
             topics = "${app.kafka.topic.product-events:product-events}.DLT",
-            groupId = "product-search-dlq-group"
+            groupId = "product-search-dlq-group",
+            containerFactory = "deadLetterKafkaListenerContainerFactory"
     )
     public void handleProductEventDlq(
-            ProductEvent event,
+            byte[] eventPayload,
             @Header(name = "kafka_dlt-exception-message", defaultValue = "Unknown") String errorMessage) {
-        String sku = (event != null && event.sku() != null) ? event.sku() : "UNKNOWN";
-        log.error("⚠️ Dead Letter Queue Alert: Message for SKU '{}' (eventId={}) failed processing. Reason: {}",
-                sku, event != null ? event.eventId() : "N/A", errorMessage);
+        log.error("Product event sent to the dead-letter topic (payloadBytes={}, reason={})",
+                eventPayload == null ? 0 : eventPayload.length, errorMessage);
     }
 
-    /**
-     * Maps a ProductEvent payload to an OpenSearch ProductDocument projection, including version metadata.
-     *
-     * @param event the product event to map
-     * @return the constructed ProductDocument
-     */
-    private ProductDocument mapToDocument(ProductEvent event) {
-        return ProductDocument.builder()
-                .id(String.valueOf(event.productId()))
-                .sku(event.sku())
-                .name(event.name())
-                .description(event.description())
-                .price(event.price())
-                .stockQuantity(event.stockQuantity())
-                .version(event.version())
-                .build();
-    }
 }

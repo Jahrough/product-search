@@ -67,9 +67,10 @@ of `ProductEvent`:
 
 ```json
 {
+  "schemaVersion": 1,
   "eventId": "7df16f23-9bd6-4d8c-9c7c-8128f2ae8020",
   "version": 1,
-  "productId": "prod-12345",
+  "productId": 123,
   "sku": "SKU-98765",
   "name": "Ergonomic Mechanical Keyboard",
   "description": "Wireless mechanical keyboard",
@@ -79,6 +80,13 @@ of `ProductEvent`:
   "timestamp": "2026-10-25T12:00:00"
 }
 ```
+
+The checked-in JSON Schema at
+`src/main/resources/schemas/product-event-v1.schema.json` is enforced by the
+Kafka value deserializer before application listeners receive events. Schema
+version `1` is required; unsupported versions and incompatible payloads fail
+deserialization and are routed through the existing retry/dead-letter flow.
+The schema is versioned in the repository; this does not use a Schema Registry.
 
 `eventType` is `CREATED`, `UPDATED`, or `DELETED`. For indexing, `eventId`,
 `productId`, and `eventType` must be present. Producers should supply a unique
@@ -92,6 +100,103 @@ initial attempt. After retries, records are published to
 failures but does not repair or replay them. The general processing listener,
 indexing listener, and DLT listener use separate consumer groups, so each group
 receives the relevant topic independently.
+
+### CDC outbox integration contract
+
+This repository is the consumer side only. It does not own the catalog's
+products table, an outbox table, Debezium, Kafka Connect, Kafka topics, or
+platform deployment manifests. Those resources belong in `product-catalog`,
+`platform-infrastructure`, and `platform-gitops`, respectively. The handoff
+contract should be:
+
+- In one catalog database transaction, mutate the product and insert one
+  immutable outbox row. A rollback must remove both changes; the request path
+  must not publish directly to Kafka.
+- Use a UUID event ID and a monotonically increasing version allocated with
+  the product mutation. A PostgreSQL schema can enforce the contract like
+  this:
+
+  ```sql
+  CREATE TABLE outbox_events (
+      id               UUID PRIMARY KEY,
+      aggregate_type   TEXT NOT NULL,
+      aggregate_id     TEXT NOT NULL,
+      aggregate_version BIGINT NOT NULL CHECK (aggregate_version > 0),
+      event_type       TEXT NOT NULL CHECK (event_type IN ('CREATED', 'UPDATED', 'DELETED')),
+      payload          JSONB NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+      status           TEXT NOT NULL DEFAULT 'PENDING'
+                       CHECK (status IN ('PENDING', 'PROCESSED', 'FAILED')),
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+      processed_at     TIMESTAMPTZ,
+      UNIQUE (aggregate_type, aggregate_id, aggregate_version),
+      CHECK (payload->>'eventId' = id::text),
+      CHECK (payload->>'eventType' = event_type),
+      CHECK (payload->>'version' = aggregate_version::text)
+  );
+  CREATE INDEX outbox_events_created_at_idx ON outbox_events (created_at);
+  ```
+
+  Ensure catalog writes and outbox inserts share the same transaction manager
+  and PostgreSQL connection. Use a transactional aggregate-version update so
+  concurrent writers cannot publish duplicate or regressing versions.
+- The outbox identity and routing fields (`id`, `aggregate_type`,
+  `aggregate_id`, `event_type`, `payload`, `created_at`) must map explicitly
+  in the Debezium Outbox Event Router configuration.
+  `payload` must be a complete Product Event JSON object that conforms to
+  `product-event-v1.schema.json`, including `eventId` equal to outbox `id`,
+  `productId`, monotonically increasing `version`, `eventType`, and `timestamp`.
+  Serialize the canonical product ID as the Kafka key. Do not rely on Debezium
+  headers to supply required fields inside the JSON payload.
+- Configure Debezium's PostgreSQL connector against the outbox table and its
+  publication/replication slot. Configure the Outbox Event Router to route
+  product rows to `product-events`, use `aggregate_id` as the Kafka key, map
+  the outbox event type, and pass the JSON payload through without a Connect
+  envelope. Keep connector credentials and environment-specific settings in
+  GitOps-managed secret references, not source control.
+- Use a stable key and partitioning policy for the lifetime of an aggregate.
+  Kafka preserves order only within a partition; changing partition count or
+  routing keys can affect ordering assumptions. Debezium delivery is
+  at-least-once, so duplicates after connector restarts are expected.
+- Treat the outbox as an append-only CDC log. A `status`/`processed_at` update
+  is not proof that Debezium or the consumer delivered an event and creates
+  extra WAL/CDC traffic. Keep these fields at their initial values for the
+  CDC path; if status transitions are required by a separate business
+  workflow, define that owner and those semantics separately. Archive or
+  delete old rows in bounded batches only after a retention window and with
+  replication-slot/WAL lag monitored; never drop a slot or outrun the
+  connector during cleanup.
+
+The search consumer uses the event ID inbox and aggregate version to ignore
+replays and stale events, and writes documents using the product ID as the
+OpenSearch document ID. OpenSearch and the PostgreSQL inbox cannot commit
+atomically: if indexing succeeds and the process crashes before inbox commit,
+the event will be replayed. That replay must remain a deterministic upsert or
+delete. The inbox version guard and Kafka key ordering are both required;
+Redis is only a disposable cache and is not the deduplication source. A
+reconciliation process must compare a catalog snapshot (including source
+versions and deletion state) against the search projection and repair drift;
+that source-of-truth access and scheduling are not implemented in this
+consumer repository.
+
+### Platform and operational ownership
+
+`platform-infrastructure` should define the Kafka topic and DLT partitions and
+replication, Debezium Connect runtime, connector config, PostgreSQL publication
+and replication-slot prerequisites, and OpenSearch index template. `platform-gitops`
+should deploy the connector and consumer with per-environment secret references,
+resource policies, and readiness/rollout controls. Alert on connector task
+failures, replication-slot retained WAL, Kafka consumer lag, and DLT growth.
+DLT handling needs an operator-controlled inspect/replay path; the current DLT
+listener only logs and does not backfill the projection.
+
+The end-to-end acceptance suite should run the catalog transaction, PostgreSQL,
+Debezium Connect, Kafka, and this consumer together. It should verify that a
+committed outbox insert is indexed, a rolled-back transaction is not emitted,
+the Kafka key is the aggregate ID, repeated delivery and consumer restart do
+not corrupt the projection, and a broker outage eventually catches up without
+loss. These cross-repository infrastructure tests cannot be run from this
+repository alone; its Kafka integration tests cover consumer recovery and
+byte-preserving DLT routing.
 
 ## Technology stack
 
@@ -354,9 +459,6 @@ tags, then signs the commit-tagged image with keyless Cosign.
   therefore is not functional.
 - Search fallback returns an empty page for OpenSearch failures, which makes
   outages indistinguishable from genuine zero-result searches to API clients.
-- Product deletion evicts the ID cache entry but does not explicitly evict a
-  SKU-keyed lookup. A deleted product can remain visible through the SKU cache
-  until that entry expires.
 - OpenSearch and PostgreSQL writes are not one atomic transaction. Event
   handling is at-least-once and requires stable event IDs, version checks, and
   operational reconciliation.

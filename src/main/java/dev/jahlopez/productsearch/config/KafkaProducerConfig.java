@@ -2,8 +2,11 @@
 package dev.jahlopez.productsearch.config;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.serialization.ByteArraySerializer;
+import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -11,6 +14,7 @@ import org.springframework.core.env.Environment;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.ProducerFactory;
+import org.springframework.kafka.support.serializer.DelegatingByTypeSerializer;
 import org.springframework.kafka.support.serializer.JacksonJsonSerializer;
 
 /**
@@ -31,10 +35,14 @@ public class KafkaProducerConfig {
                 environment.getRequiredProperty("spring.kafka.bootstrap-servers")
         );
 
+        Map<Class<?>, Serializer<?>> valueSerializers = new LinkedHashMap<>();
+        valueSerializers.put(byte[].class, new ByteArraySerializer());
+        valueSerializers.put(Object.class, new JacksonJsonSerializer<>());
+
         return new DefaultKafkaProducerFactory<>(
                 properties,
                 new StringSerializer(),
-                new JacksonJsonSerializer<>()
+                new DelegatingByTypeSerializer(valueSerializers, true)
         );
     }
 
