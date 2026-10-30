@@ -14,6 +14,8 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.opensearch.client.opensearch.OpenSearchClient;
+import org.opensearch.client.opensearch._types.ErrorResponse;
+import org.opensearch.client.opensearch._types.OpenSearchException;
 import org.opensearch.client.opensearch.core.DeleteRequest;
 import org.opensearch.client.opensearch.core.DeleteResponse;
 import org.opensearch.client.opensearch.core.GetResponse;
@@ -189,6 +191,85 @@ class ProductSearchServiceTest {
             assertThat(result.getTotalElements()).isZero();
 
             verifyNoInteractions(productMapper);
+        }
+    }
+
+    @Nested
+    @DisplayName("findById missing-index handling")
+    class FindByIdTests {
+
+        private OpenSearchException openSearchError(int status, String type) {
+            return new OpenSearchException(ErrorResponse.of(r -> r
+                    .status(status)
+                    .error(e -> e.type(type).reason(type))));
+        }
+
+        @Test
+        @DisplayName("Should return the document when it exists")
+        void shouldReturnExistingDocument() throws IOException {
+            @SuppressWarnings("unchecked")
+            GetResponse<ProductDocument> response = mock(GetResponse.class);
+            when(response.found()).thenReturn(true);
+            when(response.source()).thenReturn(sampleDocument);
+            when(openSearchClient.get(any(Function.class), eq(ProductDocument.class)))
+                    .thenReturn(response);
+
+            assertThat(productSearchService.findById(PRODUCT_ID)).contains(sampleDocument);
+        }
+
+        @Test
+        @DisplayName("Should return empty when the index exists but the document does not")
+        void shouldReturnEmptyWhenDocumentMissing() throws IOException {
+            @SuppressWarnings("unchecked")
+            GetResponse<ProductDocument> response = mock(GetResponse.class);
+            when(response.found()).thenReturn(false);
+            when(openSearchClient.get(any(Function.class), eq(ProductDocument.class)))
+                    .thenReturn(response);
+
+            assertThat(productSearchService.findById(PRODUCT_ID)).isEmpty();
+        }
+
+        @Test
+        @DisplayName("Should return empty when the index does not exist")
+        void shouldReturnEmptyWhenIndexMissing() throws IOException {
+            when(openSearchClient.get(any(Function.class), eq(ProductDocument.class)))
+                    .thenThrow(openSearchError(404, "index_not_found_exception"));
+
+            assertThat(productSearchService.findById(PRODUCT_ID)).isEmpty();
+        }
+
+        @Test
+        @DisplayName("Should propagate a 404 that is not index_not_found_exception")
+        void shouldPropagateOtherNotFoundErrors() throws IOException {
+            when(openSearchClient.get(any(Function.class), eq(ProductDocument.class)))
+                    .thenThrow(openSearchError(404, "resource_not_found_exception"));
+
+            assertThatThrownBy(() -> productSearchService.findById(PRODUCT_ID))
+                    .isInstanceOf(OpenSearchException.class);
+        }
+
+        @Test
+        @DisplayName("Should propagate authorization and server errors")
+        void shouldPropagateAuthAndServerErrors() throws IOException {
+            when(openSearchClient.get(any(Function.class), eq(ProductDocument.class)))
+                    .thenThrow(openSearchError(403, "security_exception"))
+                    .thenThrow(openSearchError(500, "index_not_found_exception"));
+
+            assertThatThrownBy(() -> productSearchService.findById(PRODUCT_ID))
+                    .isInstanceOf(OpenSearchException.class);
+            assertThatThrownBy(() -> productSearchService.findById(PRODUCT_ID))
+                    .isInstanceOf(OpenSearchException.class);
+        }
+
+        @Test
+        @DisplayName("Should not convert connection failures into an empty result")
+        void shouldPropagateConnectionFailures() throws IOException {
+            when(openSearchClient.get(any(Function.class), eq(ProductDocument.class)))
+                    .thenThrow(new IOException("connection refused"));
+
+            assertThatThrownBy(() -> productSearchService.findById(PRODUCT_ID))
+                    .isNotInstanceOf(java.util.NoSuchElementException.class)
+                    .hasMessageNotContaining("absent");
         }
     }
 

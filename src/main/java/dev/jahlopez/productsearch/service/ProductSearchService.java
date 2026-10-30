@@ -10,6 +10,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.opensearch.client.opensearch.OpenSearchClient;
 import org.opensearch.client.opensearch._types.FieldValue;
+import org.opensearch.client.opensearch._types.OpenSearchException;
 import org.opensearch.client.opensearch.core.DeleteRequest;
 import org.opensearch.client.opensearch.core.GetResponse;
 import org.opensearch.client.opensearch.core.IndexRequest;
@@ -342,6 +343,13 @@ public class ProductSearchService {
                     ? Optional.ofNullable(response.source())
                     : Optional.empty();
 
+        } catch (OpenSearchException exception) {
+            if (isIndexNotFound(exception)) {
+                log.debug("Index {} does not exist; treating product {} as absent",
+                        INDEX_NAME, productId);
+                return Optional.empty();
+            }
+            throw exception;
         } catch (IOException exception) {
             throw openSearchFailure(
                     "Product retrieval failed for ID " + productId,
@@ -349,6 +357,12 @@ public class ProductSearchService {
                     exception
             );
         }
+    }
+
+    private static boolean isIndexNotFound(OpenSearchException exception) {
+        return exception.status() == 404
+                && exception.error() != null
+                && "index_not_found_exception".equals(exception.error().type());
     }
 
     private void validateSearchRequest(
