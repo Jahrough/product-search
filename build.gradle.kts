@@ -36,6 +36,13 @@ val resilience4jVersion = "2.2.0"
 extra["testcontainers.version"] = testcontainersVersion
 
 dependencies {
+    // Transitive dependency override for vulnerability fix (via kafka-clients)
+    constraints {
+        implementation("org.xerial.snappy:snappy-java:1.1.10.9") {
+            because("fixes heap buffer overflow and unbounded memory allocation in <= 1.1.10.8")
+        }
+    }
+
     // REST API and validation
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springframework.boot:spring-boot-starter-validation")
