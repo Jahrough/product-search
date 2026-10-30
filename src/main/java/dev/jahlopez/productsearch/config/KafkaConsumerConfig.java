@@ -2,6 +2,7 @@
 package dev.jahlopez.productsearch.config;
 
 import dev.jahlopez.productsearch.event.ProductEvent;
+import dev.jahlopez.productsearch.exception.InvalidProductEventException;
 import dev.jahlopez.productsearch.exception.ProductEventConflictException;
 import java.util.HashMap;
 import java.util.Map;
@@ -35,10 +36,11 @@ import org.springframework.util.backoff.ExponentialBackOff;
  * is below 120s plus one interval (under 150s). When the budget is exhausted the
  * record is routed to {@code <original-topic>.DLT}. Retries block the partition.
  *
- * <p>{@code ProductEventConflictException} and {@code IllegalArgumentException}
+ * <p>{@code ProductEventConflictException} and {@code InvalidProductEventException}
  * (validation / unsupported event type) cannot succeed on retry and are sent
- * directly to the DLT. Every other exception, including infrastructure failures
- * from PostgreSQL or OpenSearch, remains retryable.
+ * directly to the DLT. Every other exception, including an unrelated
+ * {@code IllegalArgumentException} and infrastructure failures from PostgreSQL or
+ * OpenSearch, remains retryable.
  *
  * <p>Ordering assumption: a single consumer per partition. The version guard in
  * the listener is check-then-write and does not protect against concurrent writers.
@@ -148,7 +150,7 @@ public class KafkaConsumerConfig {
         var errorHandler = new DefaultErrorHandler(recoverer, backOff);
         errorHandler.addNotRetryableExceptions(
                 ProductEventConflictException.class,
-                IllegalArgumentException.class
+                InvalidProductEventException.class
         );
         return errorHandler;
     }

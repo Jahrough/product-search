@@ -2,6 +2,7 @@ package dev.jahlopez.productsearch.listener;
 
 import dev.jahlopez.productsearch.document.ProductDocument;
 import dev.jahlopez.productsearch.event.ProductEvent;
+import dev.jahlopez.productsearch.exception.InvalidProductEventException;
 import dev.jahlopez.productsearch.exception.ProductEventConflictException;
 import dev.jahlopez.productsearch.mapper.ProductMapper;
 import dev.jahlopez.productsearch.repository.ProcessedEventEntity;
@@ -109,7 +110,7 @@ class ProductEventConsumerTest {
     void shouldRejectNullIndexingEvent() {
         assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
                 null, "product-events", 0, 100L))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(InvalidProductEventException.class)
                 .hasMessage("Product event payload must not be null.");
 
         verifyNoInteractions(productSearchService, processedEventRepository);
@@ -132,7 +133,7 @@ class ProductEventConsumerTest {
 
         assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
                 eventWithoutSku, "product-events", 0, 100L))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(InvalidProductEventException.class)
                 .hasMessage("Product SKU is required for create and update events.");
 
         verifyNoInteractions(productSearchService, processedEventRepository);
@@ -155,7 +156,7 @@ class ProductEventConsumerTest {
 
         assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
                 eventWithoutType, "product-events", 0, 100L))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(InvalidProductEventException.class)
                 .hasMessage("Product event eventType is required.");
 
         verifyNoInteractions(productSearchService, processedEventRepository);
@@ -168,7 +169,7 @@ class ProductEventConsumerTest {
 
         assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
                 eventWithoutVersion, "product-events", 0, 100L))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(InvalidProductEventException.class)
                 .hasMessage("Product event version must be greater than zero.");
 
         verifyNoInteractions(productSearchService, processedEventRepository);
@@ -190,7 +191,7 @@ class ProductEventConsumerTest {
     @DisplayName("Should fail null general-listener payloads so Kafka recovery can route them to the DLT")
     void shouldRejectNullGeneralListenerEvent() {
         assertThatThrownBy(() -> productEventConsumer.handleProductEvent(null, 100L))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(InvalidProductEventException.class)
                 .hasMessage("Product event payload must not be null.");
 
         verifyNoInteractions(productSearchService, processedEventRepository);
@@ -443,6 +444,30 @@ class ProductEventConsumerTest {
     }
 
     @Test
+    @DisplayName("Should not convert repository or service failures into invalid-event failures")
+    void shouldNotWrapInfrastructureFailureAsInvalidEvent() {
+        var databaseFailure = new org.springframework.dao.DataAccessResourceFailureException("PostgreSQL unavailable");
+        when(processedEventRepository.existsById(sampleEvent.eventId())).thenThrow(databaseFailure);
+
+        assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
+                sampleEvent, "product-events", 0, 100L))
+                .isSameAs(databaseFailure)
+                .isNotInstanceOf(InvalidProductEventException.class);
+
+        reset(processedEventRepository);
+        when(processedEventRepository.existsById(sampleEvent.eventId())).thenReturn(false);
+        when(processedEventRepository.findHighestProcessedVersion("Product", "123"))
+                .thenReturn(Optional.empty());
+        var serviceFailure = new IllegalStateException("OpenSearch unavailable");
+        when(productSearchService.findById("123")).thenThrow(serviceFailure);
+
+        assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
+                sampleEvent, "product-events", 0, 100L))
+                .isSameAs(serviceFailure)
+                .isNotInstanceOf(InvalidProductEventException.class);
+    }
+
+    @Test
     @DisplayName("Should reject projections without a version because ordering cannot be verified")
     void shouldRejectUnversionedOpenSearchDocument() {
         existingDocument.setVersion(null);
@@ -612,7 +637,7 @@ class ProductEventConsumerTest {
     private void assertInvalidVersion(Long version) {
         assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
                 eventWithVersion(version), "product-events", 0, 100L))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(InvalidProductEventException.class)
                 .hasMessage("Product event version must be greater than zero.");
 
         verifyNoInteractions(productSearchService, processedEventRepository);

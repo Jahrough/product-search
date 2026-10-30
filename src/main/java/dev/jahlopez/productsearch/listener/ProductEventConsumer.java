@@ -2,6 +2,7 @@ package dev.jahlopez.productsearch.listener;
 
 import dev.jahlopez.productsearch.document.ProductDocument;
 import dev.jahlopez.productsearch.event.ProductEvent;
+import dev.jahlopez.productsearch.exception.InvalidProductEventException;
 import dev.jahlopez.productsearch.exception.ProductEventConflictException;
 import dev.jahlopez.productsearch.mapper.ProductMapper;
 import dev.jahlopez.productsearch.repository.ProcessedEventEntity;
@@ -174,7 +175,7 @@ public class ProductEventConsumer {
                 log.info("Successfully removed product ID: {} from OpenSearch", aggregateId);
             }
             default -> {
-                throw new IllegalArgumentException(
+                throw new InvalidProductEventException(
                         "Unsupported product event type: " + event.eventType()
                 );
             }
@@ -226,38 +227,38 @@ public class ProductEventConsumer {
 
     private void validateEvent(ProductEvent event) {
         if (event == null) {
-            throw new IllegalArgumentException("Product event payload must not be null.");
+            throw new InvalidProductEventException("Product event payload must not be null.");
         }
         if (!Integer.valueOf(1).equals(event.schemaVersion())) {
-            throw new IllegalArgumentException("Product event schemaVersion must be 1.");
+            throw new InvalidProductEventException("Product event schemaVersion must be 1.");
         }
         if (event.eventId() == null) {
-            throw new IllegalArgumentException("Product event eventId is required.");
+            throw new InvalidProductEventException("Product event eventId is required.");
         }
         if (event.version() == null || event.version() < 1) {
-            throw new IllegalArgumentException("Product event version must be greater than zero.");
+            throw new InvalidProductEventException("Product event version must be greater than zero.");
         }
         if (event.productId() == null || event.productId() < 1) {
-            throw new IllegalArgumentException("Product event productId must be greater than zero.");
+            throw new InvalidProductEventException("Product event productId must be greater than zero.");
         }
         if (event.eventType() == null) {
-            throw new IllegalArgumentException("Product event eventType is required.");
+            throw new InvalidProductEventException("Product event eventType is required.");
         }
         if (event.timestamp() == null) {
-            throw new IllegalArgumentException("Product event timestamp is required.");
+            throw new InvalidProductEventException("Product event timestamp is required.");
         }
         if (event.eventType() != ProductEvent.EventType.DELETED) {
             if (event.sku() == null || event.sku().isBlank()) {
-                throw new IllegalArgumentException("Product SKU is required for create and update events.");
+                throw new InvalidProductEventException("Product SKU is required for create and update events.");
             }
             if (event.name() == null || event.name().isBlank()) {
-                throw new IllegalArgumentException("Product name is required for create and update events.");
+                throw new InvalidProductEventException("Product name is required for create and update events.");
             }
             if (event.price() == null || event.price().signum() < 0) {
-                throw new IllegalArgumentException("Product price must be non-negative for create and update events.");
+                throw new InvalidProductEventException("Product price must be non-negative for create and update events.");
             }
             if (event.stockQuantity() == null || event.stockQuantity() < 0) {
-                throw new IllegalArgumentException("Product stockQuantity must be non-negative for create and update events.");
+                throw new InvalidProductEventException("Product stockQuantity must be non-negative for create and update events.");
             }
         }
     }
