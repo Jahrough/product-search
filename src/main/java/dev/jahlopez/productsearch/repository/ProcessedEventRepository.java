@@ -13,4 +13,7 @@ public interface ProcessedEventRepository extends JpaRepository<ProcessedEventEn
 
     @Query("SELECT MAX(p.aggregateVersion) FROM ProcessedEventEntity p WHERE p.aggregateType = :aggregateType AND p.aggregateId = :aggregateId")
     Optional<Long> findHighestProcessedVersion(@Param("aggregateType") String aggregateType, @Param("aggregateId") String aggregateId);
+
+    boolean existsByAggregateTypeAndAggregateIdAndAggregateVersion(
+            String aggregateType, String aggregateId, Long aggregateVersion);
 }

@@ -2,6 +2,7 @@ package dev.jahlopez.productsearch.listener;
 
 import dev.jahlopez.productsearch.document.ProductDocument;
 import dev.jahlopez.productsearch.event.ProductEvent;
+import dev.jahlopez.productsearch.exception.ProductEventConflictException;
 import dev.jahlopez.productsearch.mapper.ProductMapper;
 import dev.jahlopez.productsearch.repository.ProcessedEventEntity;
 import dev.jahlopez.productsearch.repository.ProcessedEventRepository;
@@ -13,6 +14,7 @@ import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -105,12 +107,22 @@ public class ProductEventConsumer {
         // 2. Out-of-Order Check via Inbox Table
         Optional<Long> maxProcessedVersion =
                 processedEventRepository.findHighestProcessedVersion(AGGREGATE_TYPE, aggregateId);
-        if (maxProcessedVersion.isPresent() && incomingVersion <= maxProcessedVersion.get()) {
-            throw new IllegalStateException(
-                    "Stale or out-of-order product event: aggregateId=" + aggregateId
-                            + ", incomingVersion=" + incomingVersion
-                            + ", currentMaxVersion=" + maxProcessedVersion.get()
-            );
+        if (maxProcessedVersion.isPresent()) {
+            long maxVersion = maxProcessedVersion.get();
+            if (incomingVersion < maxVersion) {
+                log.warn("Stale product event skipped: aggregateId={}, incomingVersion={}, inboxMaxVersion={}, eventId={}",
+                        aggregateId, incomingVersion, maxVersion, eventId);
+                recordSkipped(event, topic, partition, offset);
+                return;
+            }
+            if (incomingVersion == maxVersion) {
+                // The inbox already holds a different event for this aggregate version.
+                throw new ProductEventConflictException(
+                        "Event identity conflict: aggregateId=" + aggregateId
+                                + ", version=" + incomingVersion
+                                + " already recorded in inbox with a different eventId; incoming eventId=" + eventId
+                );
+            }
         }
 
         // 3. Fallback Document Version Guard in OpenSearch
@@ -126,12 +138,26 @@ public class ProductEventConsumer {
                     );
                 }
 
-                if (incomingVersion <= existingVersion) {
-                    throw new IllegalStateException(
-                            "Stale or out-of-order product event: aggregateId=" + aggregateId
-                                    + ", incomingVersion=" + incomingVersion
-                                    + ", currentOpenSearchVersion=" + existingVersion
-                    );
+                if (incomingVersion < existingVersion) {
+                    log.warn("Stale product event skipped: aggregateId={}, incomingVersion={}, openSearchVersion={}, eventId={}",
+                            aggregateId, incomingVersion, existingVersion, eventId);
+                    recordSkipped(event, topic, partition, offset);
+                    return;
+                }
+
+                if (incomingVersion == existingVersion) {
+                    if (!isEquivalentState(productMapper.toDocument(event), existingDoc)) {
+                        throw new ProductEventConflictException(
+                                "Product state conflict: aggregateId=" + aggregateId
+                                        + ", version=" + incomingVersion
+                                        + " is already indexed with different content; incoming eventId=" + eventId
+                        );
+                    }
+                    // Recovery path: OpenSearch write succeeded earlier but the inbox write did not.
+                    log.info("Version already applied in OpenSearch; recording inbox only: aggregateId={}, version={}, eventId={}",
+                            aggregateId, incomingVersion, eventId);
+                    processedEventRepository.save(buildInboxRecord(event, "SUCCESS", topic, partition, offset));
+                    return;
                 }
             }
         }
@@ -155,20 +181,47 @@ public class ProductEventConsumer {
         }
 
         // 5. Record Processed Event in Inbox Table
-        ProcessedEventEntity processedEvent = ProcessedEventEntity.builder()
-                .eventId(eventId)
+        processedEventRepository.save(buildInboxRecord(event, "SUCCESS", topic, partition, offset));
+        log.info("Recorded eventId={} in inbox table for aggregateId={}", eventId, aggregateId);
+    }
+
+    /**
+     * Records a stale event as SKIPPED unless the unique (aggregate, version) slot is already
+     * taken, in which case the existing inbox row is preserved untouched.
+     */
+    private void recordSkipped(ProductEvent event, String topic, int partition, long offset) {
+        String aggregateId = String.valueOf(event.productId());
+        if (processedEventRepository.existsByAggregateTypeAndAggregateIdAndAggregateVersion(
+                AGGREGATE_TYPE, aggregateId, event.version())) {
+            return;
+        }
+        processedEventRepository.save(buildInboxRecord(event, "SKIPPED", topic, partition, offset));
+    }
+
+    private ProcessedEventEntity buildInboxRecord(
+            ProductEvent event, String status, String topic, int partition, long offset) {
+        return ProcessedEventEntity.builder()
+                .eventId(event.eventId())
                 .aggregateType(AGGREGATE_TYPE)
-                .aggregateId(aggregateId)
-                .aggregateVersion(incomingVersion)
+                .aggregateId(String.valueOf(event.productId()))
+                .aggregateVersion(event.version())
                 .eventType(event.eventType().name())
-                .status("SUCCESS")
+                .status(status)
                 .kafkaTopic(topic)
                 .kafkaPartition(partition)
                 .kafkaOffset(offset)
                 .build();
+    }
 
-        processedEventRepository.save(processedEvent);
-        log.info("Recorded eventId={} in inbox table for aggregateId={}", eventId, aggregateId);
+    // The document carries no eventId, so this proves equivalent state, not identical event identity.
+    private boolean isEquivalentState(ProductDocument incoming, ProductDocument existing) {
+        return Objects.equals(incoming.getSku(), existing.getSku())
+                && Objects.equals(incoming.getName(), existing.getName())
+                && Objects.equals(incoming.getDescription(), existing.getDescription())
+                && Objects.equals(incoming.getStockQuantity(), existing.getStockQuantity())
+                && (incoming.getPrice() == null
+                        ? existing.getPrice() == null
+                        : existing.getPrice() != null && incoming.getPrice().compareTo(existing.getPrice()) == 0);
     }
 
     private void validateEvent(ProductEvent event) {

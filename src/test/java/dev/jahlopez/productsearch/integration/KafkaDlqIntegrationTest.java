@@ -51,8 +51,18 @@ import static org.awaitility.Awaitility.await;
 @Testcontainers
 @ActiveProfiles("test")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-@Import(KafkaTestProducerConfig.class)
+@Import({KafkaTestProducerConfig.class, KafkaDlqIntegrationTest.ShortBackOffConfig.class})
 class KafkaDlqIntegrationTest {
+
+    /** Keeps the production error-handler wiring but replaces the 120s retry budget with a short one. */
+    @org.springframework.boot.test.context.TestConfiguration(proxyBeanMethods = false)
+    static class ShortBackOffConfig {
+        @org.springframework.context.annotation.Bean
+        @org.springframework.context.annotation.Primary
+        org.springframework.util.backoff.BackOff testRetryBackOff() {
+            return new org.springframework.util.backoff.FixedBackOff(200L, 3L);
+        }
+    }
 
     private static final String MAIN_TOPIC = "product-events";
     private static final String DLT_TOPIC = MAIN_TOPIC + ".DLT";

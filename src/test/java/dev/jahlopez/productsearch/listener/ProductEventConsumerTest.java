@@ -2,6 +2,7 @@ package dev.jahlopez.productsearch.listener;
 
 import dev.jahlopez.productsearch.document.ProductDocument;
 import dev.jahlopez.productsearch.event.ProductEvent;
+import dev.jahlopez.productsearch.exception.ProductEventConflictException;
 import dev.jahlopez.productsearch.mapper.ProductMapper;
 import dev.jahlopez.productsearch.repository.ProcessedEventEntity;
 import dev.jahlopez.productsearch.repository.ProcessedEventRepository;
@@ -235,44 +236,119 @@ class ProductEventConsumerTest {
      * updating OpenSearch or saving duplicates in the inbox table.
      */
     @Test
-    @DisplayName("Should fail and skip indexing when incoming version is older or equal")
+    @DisplayName("Should raise a non-retryable conflict when the inbox holds a different event for the same version")
     void shouldRejectStaleOrDuplicateAggregateVersion() {
-        // Arrange: Inbox table already saw version 2L, incoming version is 2L (stale/equal)
         when(processedEventRepository.existsById(sampleEvent.eventId())).thenReturn(false);
         when(processedEventRepository.findHighestProcessedVersion("Product", "123"))
                 .thenReturn(Optional.of(2L));
 
         assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
                 sampleEvent, "product-events", 0, 100L))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Stale or out-of-order product event")
-                .hasMessageContaining("incomingVersion=2")
-                .hasMessageContaining("currentMaxVersion=2");
+                .isInstanceOf(ProductEventConflictException.class)
+                .hasMessageContaining("Event identity conflict")
+                .hasMessageContaining("version=2");
 
-        verify(productSearchService, never()).indexProduct(any(ProductDocument.class));
+        verifyNoInteractions(productSearchService);
         verify(processedEventRepository, never()).save(any(ProcessedEventEntity.class));
+        verify(processedEventRepository, never())
+                .existsByAggregateTypeAndAggregateIdAndAggregateVersion(anyString(), anyString(), any());
     }
 
     @Test
-    @DisplayName("Should reject an older event version instead of silently acknowledging it")
-    void shouldRejectOlderAggregateVersion() {
+    @DisplayName("Should skip an older event as SKIPPED without touching OpenSearch")
+    void shouldSkipOlderAggregateVersion() {
         when(processedEventRepository.existsById(sampleEvent.eventId())).thenReturn(false);
         when(processedEventRepository.findHighestProcessedVersion("Product", "123"))
                 .thenReturn(Optional.of(3L));
+        when(processedEventRepository.existsByAggregateTypeAndAggregateIdAndAggregateVersion("Product", "123", 2L))
+                .thenReturn(false);
 
-        assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
+        assertThatCode(() -> productEventConsumer.handleSearchIndexingEvent(
                 sampleEvent, "product-events", 0, 100L))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("incomingVersion=2")
-                .hasMessageContaining("currentMaxVersion=3");
+                .doesNotThrowAnyException();
+
+        verifyNoInteractions(productSearchService);
+        var saved = org.mockito.ArgumentCaptor.forClass(ProcessedEventEntity.class);
+        verify(processedEventRepository).save(saved.capture());
+        assertThat(saved.getValue().getStatus()).isEqualTo("SKIPPED");
+        assertThat(saved.getValue().getEventId()).isEqualTo(sampleEvent.eventId());
+    }
+
+    @Test
+    @DisplayName("Should not insert a SKIPPED row when the aggregate/version slot already exists")
+    void shouldPreserveExistingInboxRowForStaleVersion() {
+        when(processedEventRepository.existsById(sampleEvent.eventId())).thenReturn(false);
+        when(processedEventRepository.findHighestProcessedVersion("Product", "123"))
+                .thenReturn(Optional.of(3L));
+        when(processedEventRepository.existsByAggregateTypeAndAggregateIdAndAggregateVersion("Product", "123", 2L))
+                .thenReturn(true);
+
+        assertThatCode(() -> productEventConsumer.handleSearchIndexingEvent(
+                sampleEvent, "product-events", 0, 100L))
+                .doesNotThrowAnyException();
 
         verifyNoInteractions(productSearchService);
         verify(processedEventRepository, never()).save(any(ProcessedEventEntity.class));
     }
 
     @Test
-    @DisplayName("Should reject versions that are not newer than the OpenSearch projection")
-    void shouldRejectVersionNotNewerThanOpenSearchDocument() {
+    @DisplayName("Should skip an event older than the OpenSearch projection without overwriting it")
+    void shouldSkipVersionOlderThanOpenSearchDocument() {
+        existingDocument.setVersion(3L);
+        when(processedEventRepository.existsById(sampleEvent.eventId())).thenReturn(false);
+        when(processedEventRepository.findHighestProcessedVersion("Product", "123"))
+                .thenReturn(Optional.empty());
+        when(productSearchService.findById("123")).thenReturn(Optional.of(existingDocument));
+
+        assertThatCode(() -> productEventConsumer.handleSearchIndexingEvent(
+                sampleEvent, "product-events", 0, 100L))
+                .doesNotThrowAnyException();
+
+        verify(productSearchService, never()).indexProduct(any(ProductDocument.class));
+        var saved = org.mockito.ArgumentCaptor.forClass(ProcessedEventEntity.class);
+        verify(processedEventRepository).save(saved.capture());
+        assertThat(saved.getValue().getStatus()).isEqualTo("SKIPPED");
+    }
+
+    @Test
+    @DisplayName("Should record SUCCESS without re-indexing when OpenSearch already holds the equivalent version")
+    void shouldAcknowledgeEquivalentStateAtEqualVersion() {
+        existingDocument = productMapper.toDocument(sampleEvent);
+        when(processedEventRepository.existsById(sampleEvent.eventId())).thenReturn(false);
+        when(processedEventRepository.findHighestProcessedVersion("Product", "123"))
+                .thenReturn(Optional.empty());
+        when(productSearchService.findById("123")).thenReturn(Optional.of(existingDocument));
+
+        assertThatCode(() -> productEventConsumer.handleSearchIndexingEvent(
+                sampleEvent, "product-events", 0, 100L))
+                .doesNotThrowAnyException();
+
+        verify(productSearchService, never()).indexProduct(any(ProductDocument.class));
+        var saved = org.mockito.ArgumentCaptor.forClass(ProcessedEventEntity.class);
+        verify(processedEventRepository).save(saved.capture());
+        assertThat(saved.getValue().getStatus()).isEqualTo("SUCCESS");
+    }
+
+    @Test
+    @DisplayName("Should treat prices that differ only in scale as equivalent")
+    void shouldComparePriceByValueNotScale() {
+        existingDocument = productMapper.toDocument(sampleEvent);
+        existingDocument.setPrice(new BigDecimal("129.990"));
+        when(processedEventRepository.existsById(sampleEvent.eventId())).thenReturn(false);
+        when(processedEventRepository.findHighestProcessedVersion("Product", "123"))
+                .thenReturn(Optional.empty());
+        when(productSearchService.findById("123")).thenReturn(Optional.of(existingDocument));
+
+        assertThatCode(() -> productEventConsumer.handleSearchIndexingEvent(
+                sampleEvent, "product-events", 0, 100L))
+                .doesNotThrowAnyException();
+
+        verify(productSearchService, never()).indexProduct(any(ProductDocument.class));
+    }
+
+    @Test
+    @DisplayName("Should raise a conflict when OpenSearch holds the same version with different content")
+    void shouldRejectDifferentStateAtEqualVersion() {
         existingDocument.setVersion(sampleEvent.version());
         when(processedEventRepository.existsById(sampleEvent.eventId())).thenReturn(false);
         when(processedEventRepository.findHighestProcessedVersion("Product", "123"))
@@ -281,10 +357,88 @@ class ProductEventConsumerTest {
 
         assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
                 sampleEvent, "product-events", 0, 100L))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("currentOpenSearchVersion=2");
+                .isInstanceOf(ProductEventConflictException.class)
+                .hasMessageContaining("Product state conflict");
 
         verify(productSearchService, never()).indexProduct(any(ProductDocument.class));
+        verify(processedEventRepository, never()).save(any(ProcessedEventEntity.class));
+    }
+
+    @Test
+    @DisplayName("Should index the first event when no OpenSearch document exists")
+    void shouldIndexFirstEventWhenDocumentAbsent() {
+        when(processedEventRepository.existsById(sampleEvent.eventId())).thenReturn(false);
+        when(processedEventRepository.findHighestProcessedVersion("Product", "123"))
+                .thenReturn(Optional.empty());
+        when(productSearchService.findById("123")).thenReturn(Optional.empty());
+
+        productEventConsumer.handleSearchIndexingEvent(sampleEvent, "product-events", 0, 100L);
+
+        verify(productSearchService).indexProduct(any(ProductDocument.class));
+        var saved = org.mockito.ArgumentCaptor.forClass(ProcessedEventEntity.class);
+        verify(processedEventRepository).save(saved.capture());
+        assertThat(saved.getValue().getStatus()).isEqualTo("SUCCESS");
+    }
+
+    @Test
+    @DisplayName("Should recover on redelivery when OpenSearch write succeeded but the inbox save failed")
+    void shouldRecoverWithoutReindexAfterInboxFailure() {
+        when(processedEventRepository.existsById(sampleEvent.eventId())).thenReturn(false);
+        when(processedEventRepository.findHighestProcessedVersion("Product", "123"))
+                .thenReturn(Optional.empty());
+        when(productSearchService.findById("123"))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(productMapper.toDocument(sampleEvent)));
+        when(processedEventRepository.save(any(ProcessedEventEntity.class)))
+                .thenThrow(new IllegalStateException("Inbox database timeout"))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
+                sampleEvent, "product-events", 0, 100L))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThatCode(() -> productEventConsumer.handleSearchIndexingEvent(
+                sampleEvent, "product-events", 0, 100L))
+                .doesNotThrowAnyException();
+
+        verify(productSearchService, times(1)).indexProduct(any(ProductDocument.class));
+        verify(processedEventRepository, times(2)).save(any(ProcessedEventEntity.class));
+    }
+
+    @Test
+    @DisplayName("Should not let a reordered version 2 overwrite version 3")
+    void shouldNotOverwriteNewerVersionWithReorderedEvent() {
+        ProductEvent v3 = eventWithVersion(3L);
+        ProductEvent v2 = eventWithVersion(2L);
+        when(processedEventRepository.existsById(any(UUID.class))).thenReturn(false);
+        when(processedEventRepository.findHighestProcessedVersion("Product", "123"))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(3L));
+        when(productSearchService.findById("123")).thenReturn(Optional.empty());
+
+        productEventConsumer.handleSearchIndexingEvent(v3, "product-events", 0, 100L);
+        productEventConsumer.handleSearchIndexingEvent(v2, "product-events", 0, 101L);
+
+        var indexed = org.mockito.ArgumentCaptor.forClass(ProductDocument.class);
+        verify(productSearchService, times(1)).indexProduct(indexed.capture());
+        assertThat(indexed.getValue().getVersion()).isEqualTo(3L);
+    }
+
+    @Test
+    @DisplayName("Should propagate infrastructure failures unchanged so they stay retryable")
+    void shouldPropagateUnexpectedFailures() {
+        when(processedEventRepository.existsById(sampleEvent.eventId())).thenReturn(false);
+        when(processedEventRepository.findHighestProcessedVersion("Product", "123"))
+                .thenReturn(Optional.empty());
+        when(productSearchService.findById("123")).thenReturn(Optional.empty());
+        doThrow(new IllegalStateException("OpenSearch unavailable"))
+                .when(productSearchService).indexProduct(any(ProductDocument.class));
+
+        assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
+                sampleEvent, "product-events", 0, 100L))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("OpenSearch unavailable");
+
         verify(processedEventRepository, never()).save(any(ProcessedEventEntity.class));
     }
 
@@ -327,7 +481,7 @@ class ProductEventConsumerTest {
     }
 
     @Test
-    @DisplayName("Should reject an already-recorded aggregate version without overwriting the projection")
+    @DisplayName("Should raise a conflict for an already-recorded aggregate version without overwriting the projection")
     void shouldRejectDuplicateAggregateVersionWithoutOpenSearchWrite() {
         when(processedEventRepository.existsById(sampleEvent.eventId())).thenReturn(false);
         when(processedEventRepository.findHighestProcessedVersion("Product", "123"))
@@ -335,8 +489,7 @@ class ProductEventConsumerTest {
 
         assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
                 sampleEvent, "product-events", 0, 100L))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Stale or out-of-order product event");
+                .isInstanceOf(ProductEventConflictException.class);
 
         verifyNoInteractions(productSearchService);
         verify(processedEventRepository, never()).save(any(ProcessedEventEntity.class));
@@ -374,7 +527,7 @@ class ProductEventConsumerTest {
     }
 
     @Test
-    @DisplayName("Should reject DELETED events whose version equals the highest processed version")
+    @DisplayName("Should raise a conflict for DELETED events whose version equals the highest processed version")
     void shouldRejectDeleteWithEqualVersion() {
         ProductEvent deleteEvent = ProductEvent.builder()
                 .schemaVersion(1).eventId(UUID.randomUUID()).version(2L).productId(123L)
@@ -385,15 +538,14 @@ class ProductEventConsumerTest {
 
         assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
                 deleteEvent, "product-events", 0, 102L))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Stale or out-of-order product event");
+                .isInstanceOf(ProductEventConflictException.class);
 
         verify(productSearchService, never()).deleteProductIndex(anyString());
         verify(processedEventRepository, never()).save(any(ProcessedEventEntity.class));
     }
 
     @Test
-    @DisplayName("Should reject DELETED events whose version is lower than the highest processed version")
+    @DisplayName("Should skip DELETED events whose version is lower than the highest processed version")
     void shouldDiscardStaleDelete() {
         ProductEvent deleteEvent = ProductEvent.builder()
                 .schemaVersion(1).eventId(UUID.randomUUID()).version(1L).productId(123L)
@@ -402,13 +554,14 @@ class ProductEventConsumerTest {
         when(processedEventRepository.existsById(deleteEvent.eventId())).thenReturn(false);
         when(processedEventRepository.findHighestProcessedVersion("Product", "123")).thenReturn(Optional.of(2L));
 
-        assertThatThrownBy(() -> productEventConsumer.handleSearchIndexingEvent(
+        assertThatCode(() -> productEventConsumer.handleSearchIndexingEvent(
                 deleteEvent, "product-events", 0, 103L))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Stale or out-of-order product event");
+                .doesNotThrowAnyException();
 
         verify(productSearchService, never()).deleteProductIndex(any());
-        verify(processedEventRepository, never()).save(any(ProcessedEventEntity.class));
+        var saved = org.mockito.ArgumentCaptor.forClass(ProcessedEventEntity.class);
+        verify(processedEventRepository).save(saved.capture());
+        assertThat(saved.getValue().getStatus()).isEqualTo("SKIPPED");
     }
 
     /**

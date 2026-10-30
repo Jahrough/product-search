@@ -2,6 +2,7 @@
 package dev.jahlopez.productsearch.config;
 
 import dev.jahlopez.productsearch.event.ProductEvent;
+import dev.jahlopez.productsearch.exception.ProductEventConflictException;
 import java.util.HashMap;
 import java.util.Map;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -19,21 +20,38 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
-import org.springframework.util.backoff.FixedBackOff;
+import org.springframework.util.backoff.BackOff;
+import org.springframework.util.backoff.ExponentialBackOff;
 
 /**
  * Configures product-event consumption and failed-message recovery.
  *
- * <p>Listener failures are retried three times with a one-second
- * interval. After retries are exhausted, the record is routed to
- * {@code <original-topic>.DLT}.
+ * <p>Retryable listener failures use a bounded exponential backoff: 1s initial
+ * interval, x2 multiplier, 30s maximum interval, 120s maximum elapsed time and a
+ * 500ms jitter base (nominal schedule 1, 2, 4, 8, 16, 30, 30, 30s). Spring scales
+ * the jitter by {@code interval / initialInterval}, so the applied jitter grows with
+ * the interval (about +-8s at the 16s step) and is clamped to [initialInterval,
+ * maxInterval]. The elapsed-time check runs before each attempt, so total retry time
+ * is below 120s plus one interval (under 150s). When the budget is exhausted the
+ * record is routed to {@code <original-topic>.DLT}. Retries block the partition.
+ *
+ * <p>{@code ProductEventConflictException} and {@code IllegalArgumentException}
+ * (validation / unsupported event type) cannot succeed on retry and are sent
+ * directly to the DLT. Every other exception, including infrastructure failures
+ * from PostgreSQL or OpenSearch, remains retryable.
+ *
+ * <p>Ordering assumption: a single consumer per partition. The version guard in
+ * the listener is check-then-write and does not protect against concurrent writers.
  */
 @Configuration(proxyBeanMethods = false)
 @EnableKafka
 public class KafkaConsumerConfig {
 
-    private static final long RETRY_INTERVAL_MS = 1_000L;
-    private static final long MAX_RETRIES = 3L;
+    static final long INITIAL_INTERVAL_MS = 1_000L;
+    static final double MULTIPLIER = 2.0;
+    static final long MAX_INTERVAL_MS = 30_000L;
+    static final long MAX_ELAPSED_TIME_MS = 120_000L;
+    static final long JITTER_MS = 500L;
     private static final String DEAD_LETTER_TOPIC_SUFFIX = ".DLT";
 
     @Bean
@@ -72,13 +90,14 @@ public class KafkaConsumerConfig {
     public ConcurrentKafkaListenerContainerFactory<String, ProductEvent>
     kafkaListenerContainerFactory(
             ConsumerFactory<String, ProductEvent> consumerFactory,
-            KafkaTemplate<String, Object> kafkaTemplate
+            KafkaTemplate<String, Object> kafkaTemplate,
+            BackOff productEventRetryBackOff
     ) {
         var factory =
                 new ConcurrentKafkaListenerContainerFactory<String, ProductEvent>();
 
         factory.setConsumerFactory(consumerFactory);
-        factory.setCommonErrorHandler(createErrorHandler(kafkaTemplate));
+        factory.setCommonErrorHandler(createErrorHandler(kafkaTemplate, productEventRetryBackOff));
 
         return factory;
     }
@@ -108,8 +127,15 @@ public class KafkaConsumerConfig {
         return factory;
     }
 
-    private DefaultErrorHandler createErrorHandler(
+    DefaultErrorHandler createErrorHandler(
             KafkaTemplate<String, Object> kafkaTemplate
+    ) {
+        return createErrorHandler(kafkaTemplate, retryBackOff());
+    }
+
+    DefaultErrorHandler createErrorHandler(
+            KafkaTemplate<String, Object> kafkaTemplate,
+            BackOff backOff
     ) {
         var recoverer = new DeadLetterPublishingRecoverer(
                 kafkaTemplate,
@@ -119,9 +145,27 @@ public class KafkaConsumerConfig {
                 )
         );
 
-        return new DefaultErrorHandler(
-                recoverer,
-                new FixedBackOff(RETRY_INTERVAL_MS, MAX_RETRIES)
+        var errorHandler = new DefaultErrorHandler(recoverer, backOff);
+        errorHandler.addNotRetryableExceptions(
+                ProductEventConflictException.class,
+                IllegalArgumentException.class
         );
+        return errorHandler;
+    }
+
+    @Bean
+    public BackOff productEventRetryBackOff() {
+        return retryBackOff();
+    }
+
+    static ExponentialBackOff retryBackOff() {
+        var backOff = new ExponentialBackOff(
+                INITIAL_INTERVAL_MS,
+                MULTIPLIER
+        );
+        backOff.setMaxInterval(MAX_INTERVAL_MS);
+        backOff.setMaxElapsedTime(MAX_ELAPSED_TIME_MS);
+        backOff.setJitter(JITTER_MS);
+        return backOff;
     }
 }
