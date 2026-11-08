@@ -13,6 +13,11 @@ import org.apache.kafka.common.serialization.Deserializer;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.json.JsonMapper;
 
+/**
+ * Parses Product Event JSON and validates it against the checked-in v1 schema before delivery
+ * to application listeners. Malformed JSON or schema violations become serialization failures
+ * for Kafka's configured recovery path; a null input remains null.
+ */
 public final class ProductEventJsonDeserializer implements Deserializer<ProductEvent> {
 
     private static final String SCHEMA_RESOURCE = "/schemas/product-event-v1.schema.json";

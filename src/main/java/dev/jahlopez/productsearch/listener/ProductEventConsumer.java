@@ -264,10 +264,10 @@ public class ProductEventConsumer {
     }
 
     /**
-     * Dedicated consumer listener to monitor, audit, and log messages landing in the Dead Letter Queue (DLT).
+     * Logs the size of a payload and the recorded failure reason for a message on the DLT.
      *
-     * @param event        the failed product event payload recovered from the DLT
-     * @param errorMessage the root-cause exception message associated with the failure
+     * @param eventPayload the failed message payload recovered from the DLT
+     * @param errorMessage the recorded exception message associated with the failure
      */
     @KafkaListener(
             topics = "${app.kafka.topic.product-events:product-events}.DLT",

@@ -27,6 +27,11 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
 
+/**
+ * Serves product queries from the OpenSearch projection and applies the configured cache
+ * and circuit-breaker behavior. Catalog remains the system of record; this service does not
+ * make projection updates or cache state transactionally consistent with Catalog.
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor

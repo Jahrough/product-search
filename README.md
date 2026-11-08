@@ -139,27 +139,43 @@ payloads fail deserialization and enter the retry/dead-letter flow. This
 repository versions the schema in source control; it does not use a Schema
 Registry.
 
+`eventId` identifies one event; `productId` identifies the Catalog product
+aggregate; and `version` is ordering metadata for that product. The JSON
+payload does not contain `aggregateType` or `aggregateId`: Catalog stores those
+as separate outbox columns (`product` and the product ID string), and the
+configured Outbox Event Router uses `aggregate_id` as the Kafka message key.
+Catalog serializes the complete product state into create/update payloads, not
+partial patches. The deletion payload is built from the product before its row
+is removed, while Search applies deletion by `productId`. Equal versions do not
+prove equal event identity or payload content.
+
 `eventType` is `CREATED`, `UPDATED`, or `DELETED`. All events require a UUID
 `eventId`, positive numeric `productId`, positive integer `version`, event
 type, and timestamp. Create/update events also require nonblank SKU and name,
 nonnegative price, and nonnegative stock quantity. Delete events are applied
 by product ID. The timestamp is descriptive and is not used for ordering.
 
-The consumer rejects incoming versions less than or equal to the highest
-version in the inbox or (for indexed documents) OpenSearch. It does not treat a
-missing version as zero or silently acknowledge stale/equal aggregate
-versions. An already-recorded `eventId` is an idempotent duplicate and is
-acknowledged without repeating side effects. Invalid payloads, including null
-events or missing required fields, fail explicitly so Kafka recovery can
-retry and route them to the DLT.
+An already-recorded `eventId` is acknowledged as a duplicate without repeating
+side effects. Otherwise, a version lower than the inbox maximum is treated as
+stale and recorded as skipped when its aggregate/version slot is unoccupied;
+an equal inbox version with a different event ID is a conflict. If the inbox
+write was missed after an OpenSearch write, the consumer also compares an equal
+indexed version: equivalent product state lets it record the inbox row, while
+different state is a conflict. This check-then-write guard is not an atomic
+OpenSearch conditional write, and matching versions alone do not prove matching
+payloads. Invalid payloads, including null events or missing required fields,
+fail explicitly.
 
-Listener failures are retried three times with a one-second backoff after the
-initial attempt. After retries, records are published to
-`<source-topic>.DLT` at the original partition number. OpenSearch indexing and
-inbox persistence form a non-atomic boundary: if indexing succeeds but inbox
-save fails, the exception propagates for Kafka retry. Re-delivery must remain
-a deterministic upsert/delete; do not rely on a Redis cache entry for
-deduplication.
+Retryable listener failures use bounded exponential backoff: a one-second
+initial interval, a multiplier of two, a 30-second maximum interval, a
+120-second elapsed-time limit, and a 500-millisecond jitter base. Invalid
+events and version conflicts go directly to the DLT; other failures are
+retried, blocking that partition while recovery is in progress. After retry
+exhaustion, records are published to `<source-topic>.DLT` at the original
+partition number. OpenSearch indexing and inbox persistence are non-atomic: if
+indexing succeeds but the inbox save fails, the exception propagates for Kafka
+retry. Re-delivery must remain a deterministic upsert/delete; Redis is not the
+deduplication source.
 
 ### CDC outbox integration contract
 
@@ -167,14 +183,23 @@ This repository is the consumer side only. It does not own the catalog's
 products table, an outbox table, Debezium, Kafka Connect, Kafka topics, or
 platform deployment manifests. Those resources belong in `product-catalog`,
 `platform-infrastructure`, and `platform-gitops`, respectively. The handoff
-contract should be:
+contract below separates the current Catalog representation from recommended
+hardening; the illustrative schema is not the Catalog migration:
 
-- In one catalog database transaction, mutate the product and insert one
-  immutable outbox row. A rollback must remove both changes; the request path
-  must not publish directly to Kafka.
-- Use a UUID event ID and a monotonically increasing version allocated with
-  the product mutation. A PostgreSQL schema can enforce the contract like
-  this:
+**Current Catalog implementation:** the `outbox` table is created by the
+Catalog migration and stores a `BIGSERIAL` row ID, unique UUID `event_id`,
+`aggregate_type`, `aggregate_id`, `event_type`, text `payload`,
+`schema_version`, `created_at`, and a `processed` flag. It has no
+`aggregate_version` column or aggregate/version uniqueness constraint; the
+event version is inside the JSON payload. Catalog writes the product and
+outbox row in the same transaction. The outbox metadata `event_type` is
+`ProductCreated`, `ProductUpdated`, or `ProductDeleted`, while the payload's
+`eventType` is `CREATED`, `UPDATED`, or `DELETED`. The current service inserts
+`processed=false`; the repository exposes a flag query, not a publication
+acknowledgment. The connector uses the outbox `aggregate_id` for the Kafka key.
+
+**Recommended schema example, not the current Catalog migration:** a UUID event
+ID and aggregate version could be constrained with a schema such as:
 
   ```sql
   CREATE TABLE outbox_events (
@@ -196,7 +221,10 @@ contract should be:
   CREATE INDEX outbox_events_created_at_idx ON outbox_events (created_at);
   ```
 
-  Ensure catalog writes and outbox inserts share the same transaction manager
+**Recommended hardening, not all enforced by the current services or
+manifests:**
+
+- Ensure catalog writes and outbox inserts share the same transaction manager
   and PostgreSQL connection. Use a transactional aggregate-version update so
   concurrent writers cannot publish duplicate or regressing versions.
 - The outbox identity and routing fields (`id`, `aggregate_type`,

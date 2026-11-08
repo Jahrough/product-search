@@ -14,6 +14,11 @@ import org.hibernate.annotations.UpdateTimestamp;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
+/**
+ * Consumer-side record of an event ID and its aggregate/version metadata, including the Kafka
+ * coordinates used for diagnosis. Database uniqueness constraints support duplicate and
+ * aggregate-version conflict checks; this inbox does not make OpenSearch and PostgreSQL atomic.
+ */
 @Entity
 @Table(name = "processed_events")
 @Data
