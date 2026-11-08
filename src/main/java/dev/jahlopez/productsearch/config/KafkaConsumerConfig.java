@@ -10,6 +10,7 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
@@ -58,9 +59,10 @@ public class KafkaConsumerConfig {
 
     @Bean
     public ConsumerFactory<String, ProductEvent> productEventConsumerFactory(
-            Environment environment
+            Environment environment,
+            KafkaProperties kafkaProperties
     ) {
-        Map<String, Object> properties = new HashMap<>();
+        Map<String, Object> properties = new HashMap<>(kafkaProperties.getProperties());
 
         properties.put(
                 ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
@@ -106,8 +108,11 @@ public class KafkaConsumerConfig {
 
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, byte[]>
-    deadLetterKafkaListenerContainerFactory(Environment environment) {
-        Map<String, Object> properties = new HashMap<>();
+    deadLetterKafkaListenerContainerFactory(
+            Environment environment,
+            KafkaProperties kafkaProperties
+    ) {
+        Map<String, Object> properties = new HashMap<>(kafkaProperties.getProperties());
         properties.put(
                 ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
                 environment.getRequiredProperty("spring.kafka.bootstrap-servers")

@@ -59,6 +59,7 @@ dependencies {
     implementation("org.flywaydb:flyway-database-postgresql")
 
     // Kafka event consumption
+    implementation("org.springframework.boot:spring-boot-kafka")
     implementation("org.springframework.kafka:spring-kafka")
     implementation("com.networknt:json-schema-validator:3.0.5")
 

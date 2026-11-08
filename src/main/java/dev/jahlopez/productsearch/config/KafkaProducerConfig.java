@@ -8,6 +8,7 @@ import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
@@ -26,9 +27,10 @@ public class KafkaProducerConfig {
 
     @Bean
     public ProducerFactory<String, Object> productEventProducerFactory(
-            Environment environment
+            Environment environment,
+            KafkaProperties kafkaProperties
     ) {
-        Map<String, Object> properties = new HashMap<>();
+        Map<String, Object> properties = new HashMap<>(kafkaProperties.getProperties());
 
         properties.put(
                 ProducerConfig.BOOTSTRAP_SERVERS_CONFIG,
