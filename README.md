@@ -106,6 +106,29 @@ document upserts/deletes and records inbox metadata; OpenSearch and PostgreSQL
 cannot commit atomically. Flyway applies the inbox migration at application
 startup.
 
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'lineColor': '#8b949e', 'edgeLabelBackground': '#21262d', 'primaryTextColor': '#e6edf3', 'tertiaryTextColor': '#e6edf3', 'clusterBkg': '#161b22', 'clusterBorder': '#30363d', 'titleColor': '#e6edf3'}}}%%
+flowchart LR
+    topic[("product-events")]
+    dlt[("product-events.DLT")]
+
+    general["General processing listener<br/>group: product-search-group<br/>configurable"]
+    indexing["Indexing listener<br/>group: product-search-search-group<br/>fixed in code"]
+    dlq["DLT listener<br/>group: product-search-dlq-group<br/>fixed in code"]
+
+    topic -->|"receives all events"| general
+    topic -->|"receives all events"| indexing
+    dlt --> dlq
+
+    classDef internal fill:#21262d,stroke:#58a6ff,stroke-width:2px,color:#e6edf3
+    classDef core fill:#1f6feb,stroke:#79c0ff,stroke-width:2px,color:#ffffff
+    class topic,dlt internal
+    class general,indexing,dlq core
+```
+
+Instances within one group share partitions; separate groups independently
+consume all events.
+
 Listener failures are retried before a `DeadLetterPublishingRecoverer` routes
 the record to `<source-topic>.DLT`. The DLT listener consumes raw bytes and
 logs the failure; it does not repair or replay the projection. Failed
@@ -168,6 +191,57 @@ OpenSearch conditional write, and matching versions alone do not prove matching
 payloads. Invalid payloads, including null events or missing required fields,
 fail explicitly.
 
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'lineColor': '#8b949e', 'edgeLabelBackground': '#21262d', 'primaryTextColor': '#e6edf3', 'tertiaryTextColor': '#e6edf3', 'clusterBkg': '#161b22', 'clusterBorder': '#30363d', 'titleColor': '#e6edf3'}}}%%
+flowchart TD
+    start(["Event delivered"])
+    deser{"Well-formed and valid against<br/>JSON Schema v1?"}
+    fields{"Required fields valid?"}
+    dup{"eventId already<br/>recorded in inbox?"}
+    ack(["Acknowledge as duplicate<br/>no side effects"])
+    stale{"Version lower than<br/>inbox maximum?"}
+    skip["Record as skipped<br/>when aggregate/version<br/>slot is unoccupied"]
+    equal{"Version equals inbox maximum<br/>with a different eventId?"}
+    indexed{"Indexed document already<br/>at this version?"}
+    same{"Equivalent<br/>product state?"}
+    apply["Apply upsert or delete<br/>in OpenSearch<br/>document ID = productId"]
+    record["Record event in inbox"]
+    done(["Acknowledge"])
+    retry["Retry flow"]
+    dltnow["Dead-letter topic<br/>directly"]
+
+    start --> deser
+    deser -->|"no"| retry
+    deser -->|"yes"| fields
+    fields -->|"no: invalid event"| dltnow
+    fields -->|"yes"| dup
+    dup -->|"yes"| ack
+    dup -->|"no"| stale
+    stale -->|"yes"| skip
+    skip --> done
+    stale -->|"no"| equal
+    equal -->|"yes: conflict"| dltnow
+    equal -->|"no"| indexed
+    indexed -->|"yes"| same
+    same -->|"yes"| record
+    same -->|"no: conflict"| dltnow
+    indexed -->|"no"| apply
+    apply --> record
+    record -->|"saved"| done
+    record -->|"save fails after indexing"| retry
+
+    classDef core fill:#1f6feb,stroke:#79c0ff,stroke-width:2px,color:#ffffff
+    classDef internal fill:#21262d,stroke:#58a6ff,stroke-width:2px,color:#e6edf3
+    classDef gate fill:#21262d,stroke:#d29922,stroke-width:2px,color:#e6edf3
+    classDef danger fill:#21262d,stroke:#f85149,stroke-width:2px,color:#e6edf3
+    classDef terminal fill:#21262d,stroke:#8b949e,stroke-width:2px,stroke-dasharray:5 5,color:#e6edf3
+    class start,ack,done terminal
+    class deser,fields,dup,stale,equal,indexed,same gate
+    class skip,record internal
+    class apply core
+    class retry,dltnow danger
+```
+
 Retryable listener failures use bounded exponential backoff: a one-second
 initial interval, a multiplier of two, a 30-second maximum interval, a
 120-second elapsed-time limit, and a 500-millisecond jitter base. Invalid
@@ -178,6 +252,35 @@ partition number. OpenSearch indexing and inbox persistence are non-atomic: if
 indexing succeeds but the inbox save fails, the exception propagates for Kafka
 retry. Re-delivery must remain a deterministic upsert/delete; Redis is not the
 deduplication source.
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'lineColor': '#8b949e', 'edgeLabelBackground': '#21262d', 'primaryTextColor': '#e6edf3', 'tertiaryTextColor': '#e6edf3', 'clusterBkg': '#161b22', 'clusterBorder': '#30363d', 'titleColor': '#e6edf3'}}}%%
+flowchart LR
+    fail["Listener failure"]
+    kind{"Failure type"}
+    retry["Retry with bounded exponential backoff<br/>1 s initial · ×2 · 30 s max interval<br/>120 s elapsed limit · 500 ms jitter base<br/>partition blocked while retrying"]
+    ok(["Processed"])
+    dlt[("source-topic.DLT<br/>original partition number")]
+    listener["DLT listener<br/>logs raw bytes<br/>does not repair or replay"]
+    operator(["Operator-controlled inspect<br/>and replay path<br/>not implemented here"])
+
+    fail --> kind
+    kind -->|"invalid event or<br/>version conflict"| dlt
+    kind -->|"other failure"| retry
+    retry -->|"recovers"| ok
+    retry -->|"retries exhausted"| dlt
+    dlt --> listener
+    listener -.-> operator
+
+    classDef internal fill:#21262d,stroke:#58a6ff,stroke-width:2px,color:#e6edf3
+    classDef gate fill:#21262d,stroke:#d29922,stroke-width:2px,color:#e6edf3
+    classDef danger fill:#21262d,stroke:#f85149,stroke-width:2px,color:#e6edf3
+    classDef terminal fill:#21262d,stroke:#8b949e,stroke-width:2px,stroke-dasharray:5 5,color:#e6edf3
+    class fail,retry,listener internal
+    class kind gate
+    class dlt danger
+    class ok,operator terminal
+```
 
 ### CDC outbox integration contract
 
@@ -203,25 +306,25 @@ acknowledgment. The connector uses the outbox `aggregate_id` for the Kafka key.
 **Recommended schema example, not the current Catalog migration:** a UUID event
 ID and aggregate version could be constrained with a schema such as:
 
-  ```sql
-  CREATE TABLE outbox_events (
-      id               UUID PRIMARY KEY,
-      aggregate_type   TEXT NOT NULL,
-      aggregate_id     TEXT NOT NULL,
-      aggregate_version BIGINT NOT NULL CHECK (aggregate_version > 0),
-      event_type       TEXT NOT NULL CHECK (event_type IN ('CREATED', 'UPDATED', 'DELETED')),
-      payload          JSONB NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
-      status           TEXT NOT NULL DEFAULT 'PENDING'
-                       CHECK (status IN ('PENDING', 'PROCESSED', 'FAILED')),
-      created_at       TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-      processed_at     TIMESTAMPTZ,
-      UNIQUE (aggregate_type, aggregate_id, aggregate_version),
-      CHECK (payload->>'eventId' = id::text),
-      CHECK (payload->>'eventType' = event_type),
-      CHECK (payload->>'version' = aggregate_version::text)
-  );
-  CREATE INDEX outbox_events_created_at_idx ON outbox_events (created_at);
-  ```
+```sql
+CREATE TABLE outbox_events (
+    id               UUID PRIMARY KEY,
+    aggregate_type   TEXT NOT NULL,
+    aggregate_id     TEXT NOT NULL,
+    aggregate_version BIGINT NOT NULL CHECK (aggregate_version > 0),
+    event_type       TEXT NOT NULL CHECK (event_type IN ('CREATED', 'UPDATED', 'DELETED')),
+    payload          JSONB NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+    status           TEXT NOT NULL DEFAULT 'PENDING'
+                     CHECK (status IN ('PENDING', 'PROCESSED', 'FAILED')),
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    processed_at     TIMESTAMPTZ,
+    UNIQUE (aggregate_type, aggregate_id, aggregate_version),
+    CHECK (payload->>'eventId' = id::text),
+    CHECK (payload->>'eventType' = event_type),
+    CHECK (payload->>'version' = aggregate_version::text)
+);
+CREATE INDEX outbox_events_created_at_idx ON outbox_events (created_at);
+```
 
 **Recommended hardening, not all enforced by the current services or
 manifests:**
@@ -278,6 +381,49 @@ resource policies, and readiness/rollout controls. Alert on connector task
 failures, replication-slot retained WAL, Kafka consumer lag, and DLT growth.
 DLT handling needs an operator-controlled inspect/replay path; the current DLT
 listener only logs and does not backfill the projection.
+
+Solid arrows show the event path; dashed arrows show the intended ownership of
+definition and deployment.
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'lineColor': '#8b949e', 'edgeLabelBackground': '#21262d', 'primaryTextColor': '#e6edf3', 'tertiaryTextColor': '#e6edf3', 'clusterBkg': '#161b22', 'clusterBorder': '#30363d', 'titleColor': '#e6edf3'}}}%%
+flowchart LR
+    subgraph catalogrepo["product-catalog"]
+        tx["Product write + outbox row<br/>same transaction"]
+        outbox[("outbox table")]
+    end
+
+    subgraph infrarepo["platform-infrastructure"]
+        defs["Defines<br/>Kafka topic + DLT<br/>Debezium Connect runtime + connector config<br/>publication and replication slot prerequisites<br/>OpenSearch index template"]
+    end
+
+    subgraph gitopsrepo["platform-gitops"]
+        deploy["Deploys connector and consumer<br/>per-environment secret references<br/>resource policies, readiness, rollout"]
+    end
+
+    subgraph thisrepo["product-search — this repository"]
+        consumer["Kafka consumer, inbox,<br/>search projection, API,<br/>DLT logging"]
+    end
+
+    router["Debezium<br/>Outbox Event Router"]
+    topic[("product-events")]
+
+    tx --> outbox
+    outbox -->|"CDC"| router
+    router -->|"key = aggregate_id"| topic
+    topic --> consumer
+    defs -.->|"defines"| router
+    defs -.->|"defines"| topic
+    deploy -.->|"deploys"| router
+    deploy -.->|"deploys"| consumer
+
+    classDef core fill:#1f6feb,stroke:#79c0ff,stroke-width:2px,color:#ffffff
+    classDef internal fill:#21262d,stroke:#58a6ff,stroke-width:2px,color:#e6edf3
+    classDef external fill:#21262d,stroke:#8b949e,stroke-width:2px,stroke-dasharray:5 5,color:#e6edf3
+    class consumer core
+    class tx,outbox,router,topic internal
+    class defs,deploy external
+```
 
 The end-to-end acceptance suite should run the catalog transaction, PostgreSQL,
 Debezium Connect, Kafka, and this consumer together. It should verify that a
@@ -375,20 +521,20 @@ curl --fail-with-body --request PUT 'http://localhost:9200/products' \
 Spring Boot configuration is supplied through environment variables. PostgreSQL
 connection settings have no application-defined defaults and must be provided.
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `SERVER_PORT` | `8081` | HTTP listening port. |
-| `SPRING_DATASOURCE_URL` | None | PostgreSQL JDBC URL, e.g. `jdbc:postgresql://localhost:5432/product_search`. |
-| `SPRING_DATASOURCE_USERNAME` | None | PostgreSQL account. |
-| `SPRING_DATASOURCE_PASSWORD` | None | PostgreSQL password. |
-| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka broker list. |
-| `SPRING_KAFKA_CONSUMER_GROUP_ID` | `product-search-group` | General event listener group and consumer-factory fallback. |
-| `SPRING_KAFKA_CONSUMER_AUTO_OFFSET_RESET` | `earliest` | Offset policy when a group has no committed offset. |
-| `APP_KAFKA_TOPIC_PRODUCT_EVENTS` | `product-events` | Product event topic; DLT uses this name plus `.DLT`. |
-| `REDIS_HOST` | `localhost` | Redis hostname. |
-| `REDIS_PORT` | `6379` | Redis port. |
-| `OPENSEARCH_URIS` | `http://localhost:9200` | OpenSearch endpoint. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318/v1/traces` | OTLP/HTTP trace export endpoint. |
+| Variable                                  | Default                           | Description                                                                  |
+| ----------------------------------------- | --------------------------------- | ---------------------------------------------------------------------------- |
+| `SERVER_PORT`                             | `8081`                            | HTTP listening port.                                                         |
+| `SPRING_DATASOURCE_URL`                   | None                              | PostgreSQL JDBC URL, e.g. `jdbc:postgresql://localhost:5432/product_search`. |
+| `SPRING_DATASOURCE_USERNAME`              | None                              | PostgreSQL account.                                                          |
+| `SPRING_DATASOURCE_PASSWORD`              | None                              | PostgreSQL password.                                                         |
+| `KAFKA_BOOTSTRAP_SERVERS`                 | `localhost:9092`                  | Kafka broker list.                                                           |
+| `SPRING_KAFKA_CONSUMER_GROUP_ID`          | `product-search-group`            | General event listener group and consumer-factory fallback.                  |
+| `SPRING_KAFKA_CONSUMER_AUTO_OFFSET_RESET` | `earliest`                        | Offset policy when a group has no committed offset.                          |
+| `APP_KAFKA_TOPIC_PRODUCT_EVENTS`          | `product-events`                  | Product event topic; DLT uses this name plus `.DLT`.                         |
+| `REDIS_HOST`                              | `localhost`                       | Redis hostname.                                                              |
+| `REDIS_PORT`                              | `6379`                            | Redis port.                                                                  |
+| `OPENSEARCH_URIS`                         | `http://localhost:9200`           | OpenSearch endpoint.                                                         |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`             | `http://localhost:4318/v1/traces` | OTLP/HTTP trace export endpoint.                                             |
 
 The indexing group (`product-search-search-group`) and DLT group
 (`product-search-dlq-group`) are fixed in code. Instances in one group share
@@ -531,6 +677,43 @@ Search circuit-breaker fallback returns an empty page when OpenSearch calls
 fail, so an empty `200` can mean either no matches or degraded search. Product
 ID and SKU lookup failures can return `500` during an OpenSearch outage.
 
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'lineColor': '#8b949e', 'edgeLabelBackground': '#21262d', 'primaryTextColor': '#e6edf3', 'tertiaryTextColor': '#e6edf3', 'clusterBkg': '#161b22', 'clusterBorder': '#30363d', 'titleColor': '#e6edf3'}}}%%
+flowchart LR
+    req(["API request"])
+    kind{"Endpoint"}
+    osSearch["OpenSearch query"]
+    page(["200: page of results"])
+    empty(["200: empty page<br/>indistinguishable from<br/>zero matches"])
+    cache{"Redis cache<br/>ID or SKU lookup"}
+    hit(["200: product"])
+    osGet["OpenSearch lookup"]
+    found(["200: product"])
+    nf(["404: not found"])
+    err(["500: OpenSearch failure"])
+
+    req --> kind
+    kind -->|"POST search"| osSearch
+    osSearch -->|"succeeds"| page
+    osSearch -->|"fails: circuit-breaker fallback"| empty
+    kind -->|"GET by ID or SKU"| cache
+    cache -->|"hit"| hit
+    cache -->|"miss"| osGet
+    osGet -->|"found"| found
+    osGet -->|"not found"| nf
+    osGet -->|"fails"| err
+
+    classDef core fill:#1f6feb,stroke:#79c0ff,stroke-width:2px,color:#ffffff
+    classDef internal fill:#21262d,stroke:#58a6ff,stroke-width:2px,color:#e6edf3
+    classDef gate fill:#21262d,stroke:#d29922,stroke-width:2px,color:#e6edf3
+    classDef danger fill:#21262d,stroke:#f85149,stroke-width:2px,color:#e6edf3
+    classDef terminal fill:#21262d,stroke:#8b949e,stroke-width:2px,stroke-dasharray:5 5,color:#e6edf3
+    class req,page,hit,found terminal
+    class kind,cache gate
+    class osSearch,osGet internal
+    class empty,nf,err danger
+```
+
 ## API documentation
 
 - Swagger UI: `http://localhost:8081/swagger-ui.html`
@@ -566,6 +749,31 @@ and validation waits, avoiding shutdown-time DDL against an already-stopped
 PostgreSQL container. Do not remove the profile/context lifecycle annotations
 without verifying container shutdown order.
 
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'lineColor': '#8b949e', 'edgeLabelBackground': '#21262d', 'primaryTextColor': '#e6edf3', 'tertiaryTextColor': '#e6edf3', 'clusterBkg': '#161b22', 'clusterBorder': '#30363d', 'titleColor': '#e6edf3'}}}%%
+flowchart LR
+    start["Integration test class starts<br/>test profile active"]
+    containers[("Testcontainers start<br/>PostgreSQL, Kafka,<br/>OpenSearch, Redis")]
+    ctx["Spring/JPA context<br/>Hibernate create<br/>bounded Hikari waits"]
+    tests["Tests run"]
+    dirty["Context marked dirty<br/>after the class"]
+    close["Context closes<br/>no shutdown-time DDL"]
+    stop[("JUnit stops containers")]
+
+    start --> containers
+    containers --> ctx
+    ctx --> tests
+    tests --> dirty
+    dirty --> close
+    close -->|"only then"| stop
+
+    classDef core fill:#1f6feb,stroke:#79c0ff,stroke-width:2px,color:#ffffff
+    classDef internal fill:#21262d,stroke:#58a6ff,stroke-width:2px,color:#e6edf3
+    classDef gate fill:#21262d,stroke:#d29922,stroke-width:2px,color:#e6edf3
+    class start,tests,ctx,containers,stop internal
+    class dirty,close gate
+```
+
 For CI-like verification without Gradle's configuration cache, retain
 `--no-configuration-cache` in the commands above. JaCoCo reports are generated
 under `build/reports/jacoco/test/`.
@@ -594,6 +802,36 @@ fails on fixable critical/high findings (unfixed vulnerabilities are ignored).
 On a successful push to `main`, it publishes the
 image to GitHub Container Registry (`ghcr.io`) with the commit SHA and `latest`
 tags, then signs the commit-tagged image with keyless Cosign.
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'lineColor': '#8b949e', 'edgeLabelBackground': '#21262d', 'primaryTextColor': '#e6edf3', 'tertiaryTextColor': '#e6edf3', 'clusterBkg': '#161b22', 'clusterBorder': '#30363d', 'titleColor': '#e6edf3'}}}%%
+flowchart LR
+    trigger(["Push or pull request<br/>targeting main"])
+    build["Build and test"]
+    image["Build Docker image"]
+    scan["Trivy scan<br/>fails on fixable critical/high<br/>unfixed findings ignored"]
+    gate{"Successful<br/>push to main?"}
+    publish[("Publish to ghcr.io<br/>commit SHA and latest tags")]
+    sign["Cosign keyless signing<br/>of commit-tagged image"]
+    stop(["No publish"])
+
+    trigger --> build
+    build --> image
+    image --> scan
+    scan --> gate
+    gate -->|"yes"| publish
+    publish --> sign
+    gate -->|"no"| stop
+
+    classDef core fill:#1f6feb,stroke:#79c0ff,stroke-width:2px,color:#ffffff
+    classDef internal fill:#21262d,stroke:#58a6ff,stroke-width:2px,color:#e6edf3
+    classDef gate fill:#21262d,stroke:#d29922,stroke-width:2px,color:#e6edf3
+    classDef terminal fill:#21262d,stroke:#8b949e,stroke-width:2px,stroke-dasharray:5 5,color:#e6edf3
+    class build,image,scan internal
+    class publish,sign core
+    class gate gate
+    class trigger,stop terminal
+```
 
 ## Design considerations and next steps
 
