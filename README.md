@@ -20,6 +20,8 @@ deployment.
 > to untrusted networks; use an authenticated gateway or implement and verify
 > application security before production use.
 
+Cross-repository architecture decisions are tracked in the canonical [Product Platform ADR index](https://github.com/Jahrough/ai-native-engineering/blob/main/docs/architecture/adr/README.md). Those records are proposals unless explicit approval is recorded; they do not imply implementation or deployment.
+
 ## Contents
 
 - [Architecture](#architecture)
